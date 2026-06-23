@@ -1,0 +1,11 @@
+Working directory TFM:
+I:\Departamentos\Óptica\paulabp\master\TFM\codigo>
+
+Virtual environment stored in:
+C:\Users\paulabp\entornos_virtuales
+
+Para cambiar al directorio en el me encontraba anteriormente (no entiende la tilde de Óptica):
+cd -
+
+To activate the virtual environment stored somewhere else from my working directory:
+C:\Users\paulabp\entornos_virtuales\.venv\Scripts\Activate.ps1

@@ -1,0 +1,14 @@
+# Entorno virtual
+.venv/
+venv/
+ENV/
+
+# Archivos temporales de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Carpetas de distribución/construcción
+dist/
+build/
+*.egg-info/
