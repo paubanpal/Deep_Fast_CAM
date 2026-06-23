@@ -1,4 +1,4 @@
-astropy==7.2.0
+astropy==6.1.7
 astropy-iers-data==0.2026.3.16.0.53.33
 asttokens==3.0.1
 colorama==0.4.6
