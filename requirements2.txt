@@ -61,4 +61,4 @@ traitlets
 typing_extensions
 tzdata
 wcwidth
-windows-curses
+#windows-curses
