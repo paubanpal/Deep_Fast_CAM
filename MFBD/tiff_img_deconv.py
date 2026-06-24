@@ -13,7 +13,7 @@ import torch
 #path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
 hpc_base_path = Path("/scratch/paulabp/TFM/images/original/imagenes_LI")
 path_folder = hpc_base_path / "binarias"
-path = path_folder / "55Uma_NOT.tif"
+path = path_folder / "55Uma_NOT_cropped.tif"
 #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
 print(path.exists())
 
@@ -33,7 +33,7 @@ print(img_stack_MFBD.shape)
 
 # Deconvolution process
 script_dir = Path(__file__).resolve().parent
-config_path = script_dir / 'config_CS_yaml.yaml'
+config_path = script_dir / 'config_NOT_yaml.yaml'
 deconv = torchmfbd.Deconvolution(str(config_path))
 
 # Convert your NumPy array to a PyTorch Tensor
