@@ -45,6 +45,9 @@ deconv.frames = torch_tensor_stack
 deconv.ind_object = [0] * 10
 # Map all 10 frames to diversity index 0
 deconv.ind_diversity = [0] * 10
+# Initialize the physical diversity tracking values
+# We pass a PyTorch tensor with a single 0.0 value representing the focus state.
+deconv.diversity = torch.tensor([0.0])
 
 deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
