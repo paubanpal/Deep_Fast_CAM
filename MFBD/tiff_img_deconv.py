@@ -4,6 +4,7 @@ import tifffile as tiff # pip install tifffile
 from pathlib import Path
 import numpy as np
 import torchmfbd
+import torch
 
 
 # We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)
@@ -35,7 +36,10 @@ script_dir = Path(__file__).resolve().parent
 config_path = script_dir / 'config_CS_yaml.yaml'
 deconv = torchmfbd.Deconvolution(str(config_path))
 
-deconv.frames = img_stack_MFBD
+# Convert your NumPy array to a PyTorch Tensor
+torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
+# Hand over the PyTorch Tensor instead of the raw NumPy array
+deconv.frames = torch_tensor_stack
 # Tell the framework which object index each frame corresponds to.
 # If all frames belong to 'object1', set them all to index 0:
 deconv.ind_object = [0] * 10
