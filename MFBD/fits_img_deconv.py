@@ -21,14 +21,14 @@ with fits.open(path) as hdul:
 
     img_stack = np.array([hdu.data for hdu in hdul[1:] if hdu.data is not None])
 
-#print(img_stack.shape) # This should now show (N, 128, 128)
+print(img_stack.shape) # This should now show (N, 128, 128)
 #print("Image size: ", data.shape)
 #print("Header: ", header)
 
 # Images saved as .FITS by ImageJ once the original image has been cropped only save one of the images, so they have finally been all saved as .tif
 # DO NOT USE THIS FILE
 with fits.open(path) as hdul:
-    #hdul.info()
+    hdul.info()
     for i, hdu in enumerate(hdul):
         data_shape = hdu.data.shape if hdu.data is not None else "No Data"
         print(f"HDU {i}: Type={type(hdu).__name__}, Shape={data_shape}")

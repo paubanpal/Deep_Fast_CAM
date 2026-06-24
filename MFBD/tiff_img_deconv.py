@@ -24,6 +24,7 @@ h, w = img_stack.shape[1], img_stack.shape[2]
 
 # Reshape to MFBD format
 img_stack_MFBD = img_stack.reshape((n_seq, n_obj, n_frm, h, w))
+img_stack_MFBD = img_stack_MFBD[:, :, :10, :, :]
 print(img_stack_MFBD.shape)
 
 # Deconvolution process
