@@ -39,6 +39,8 @@ deconv.frames = img_stack_MFBD
 # Tell the framework which object index each frame corresponds to.
 # If all frames belong to 'object1', set them all to index 0:
 deconv.ind_object = [0] * 10
+# Map all 10 frames to diversity index 0
+deconv.ind_diversity = [0] * 10
 
 deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
