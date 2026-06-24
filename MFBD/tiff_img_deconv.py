@@ -35,6 +35,8 @@ script_dir = Path(__file__).resolve().parent
 config_path = script_dir / 'config_CS_yaml.yaml'
 deconv = torchmfbd.Deconvolution(str(config_path))
 
+deconv.frames = img_stack_MFBD
+
 deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
                  simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
