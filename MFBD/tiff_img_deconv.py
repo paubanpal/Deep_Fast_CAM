@@ -9,7 +9,10 @@ import torchmfbd
 # We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)
 
 # Pathlib handles the slashes and spacing logic for you (for spaces and accents in path)
-path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")
+#path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
+hpc_base_path = Path("/scratch/paulabp/TFM/images/original/imagenes_LI")
+path_folder = hpc_base_path / "binarias"
+path = path_folder / "55Uma_NOT.tif"
 #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
 print(path.exists())
 
