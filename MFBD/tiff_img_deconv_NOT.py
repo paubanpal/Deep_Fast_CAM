@@ -48,7 +48,11 @@ torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
 # Initialize the physical diversity tracking values
 # We pass a PyTorch tensor with a single 0.0 value representing the focus state.
 #deconv.diversity = torch.tensor([0.0])
-deconv.add_frames(torch_tensor_stack)
+
+# Squeeze out the 'n_obj' dimension (dimension index 1) to make it 4D:
+# (1, 1, 10, 128, 128) becomes (1, 10, 128, 128)
+torch_tensor_stack_4d = torch_tensor_stack.squeeze(1)
+deconv.add_frames(torch_tensor_stack_4d)
 
 deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
