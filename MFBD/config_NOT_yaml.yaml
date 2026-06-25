@@ -9,7 +9,7 @@ telescope:
 
 images:
     # NOT: pix_size: 0.025arcsec
-    n_pixel : 512
+    n_pixel : 128
     pix_size : 0.025    # arcsec
     apodization_border : 6
 
