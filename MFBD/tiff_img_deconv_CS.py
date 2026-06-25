@@ -12,45 +12,53 @@ import torch
 # Pathlib handles the slashes and spacing logic for you (for spaces and accents in path)
 #path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
 hpc_base_path = Path("/scratch/paulabp/TFM/images/CS/original/")
-path_folder = hpc_base_path / "binarias"
-path = path_folder / "CHR181_7COLISSA_cropped.tif"
-#path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
-print(path.exists())
 
-# Load the image
-img_stack = tiff.imread(path)
-print(img_stack.shape)
+star_type = ["binarias", "dudosas-binarias", "simples"]
 
-n_seq = 1      # Number of sequences
-n_obj = 1      # Number of objects
-n_frm = img_stack.shape[0]     # Number of frames per object/sequence
-h, w = img_stack.shape[1], img_stack.shape[2]
+for star in star_type:
+    path_folder = hpc_base_path / star
+    path = path_folder / "CHR181_7COLISSA_cropped.tif"
+    #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
+    #print(path.exists())
 
-# Reshape to MFBD format
-img_stack_MFBD = img_stack.reshape((n_seq, n_obj, n_frm, h, w))
-img_stack_MFBD = img_stack_MFBD[:, :, :10, :, :]
-print(img_stack_MFBD.shape)
+    # Load the image
+    img_stack = tiff.imread(path)
+    #print(img_stack.shape)
 
-# Deconvolution process
-script_dir = Path(__file__).resolve().parent
-config_path = script_dir / 'config_NOT_yaml.yaml'
-deconv = torchmfbd.Deconvolution(str(config_path))
+    n_seq = 1      # Number of sequences
+    n_obj = 1      # Number of objects
+    n_frm = img_stack.shape[0]     # Number of frames per object/sequence
+    h, w = img_stack.shape[1], img_stack.shape[2]
 
-# Convert your NumPy array to a PyTorch Tensor
-torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
+    n_images = [10, 20, 50, 90, 200, 500]
 
-# Squeeze out the 'n_obj' dimension (dimension index 1) to make it 4D:
-# (1, 1, 10, 128, 128) becomes (1, 10, 128, 128)
-torch_tensor_stack_4d = torch_tensor_stack.squeeze(1)
-deconv.add_frames(torch_tensor_stack_4d)
+    for i in n_images:
+        # Reshape to MFBD format
+        img_stack_MFBD = img_stack.reshape((n_seq, n_obj, n_frm, h, w))
+        img_stack_MFBD = img_stack_MFBD[:, :, :i, :, :]
+        print(img_stack_MFBD.shape)
 
-deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
+        # Deconvolution process
+        script_dir = Path(__file__).resolve().parent
+        config_path = script_dir / 'config_CS_yaml.yaml'
+        deconv = torchmfbd.Deconvolution(str(config_path))
+
+        # Convert your NumPy array to a PyTorch Tensor
+        torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
+
+        # Squeeze out the 'n_obj' dimension (dimension index 1) to make it 4D:
+        # (1, 1, 10, 128, 128) becomes (1, 10, 128, 128)
+        torch_tensor_stack_4d = torch_tensor_stack.squeeze(1)
+        deconv.add_frames(torch_tensor_stack_4d)
+
+        deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
                  simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
                  n_iterations=20)
 
-name = path.stem + '_MFBD' + path.suffix
-deconv.write(name)
+        name = path.stem + '_' + i + '_MFBD' + path.suffix
+        final_path = path_folder / name
+        deconv.write(final_path)
 
 
 """
