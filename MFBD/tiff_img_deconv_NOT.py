@@ -38,16 +38,6 @@ deconv = torchmfbd.Deconvolution(str(config_path))
 
 # Convert your NumPy array to a PyTorch Tensor
 torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
-# Hand over the PyTorch Tensor instead of the raw NumPy array
-#deconv.frames = torch_tensor_stack
-# Tell the framework which object index each frame corresponds to.
-# If all frames belong to 'object1', set them all to index 0:
-#deconv.ind_object = [0] * 10
-# Map all 10 frames to diversity index 0
-#deconv.ind_diversity = [0] * 10
-# Initialize the physical diversity tracking values
-# We pass a PyTorch tensor with a single 0.0 value representing the focus state.
-#deconv.diversity = torch.tensor([0.0])
 
 # Squeeze out the 'n_obj' dimension (dimension index 1) to make it 4D:
 # (1, 1, 10, 128, 128) becomes (1, 10, 128, 128)
@@ -59,8 +49,9 @@ deconv.deconvolve(infer_object=False,   # If False, the object is inferred using
                  simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
                  n_iterations=20)
 
-name = path.stem + 'MFBD' + path.suffix
-deconv.write(name)
+name = path.stem + '_MFBD' + path.suffix
+final_path = path_folder / name
+deconv.write(final_path)
 
 
 """
