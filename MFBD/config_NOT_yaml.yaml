@@ -19,11 +19,11 @@ object1:
     cutoff : [0.75, 0.80]   # try diff values
     s_u_joint: 250.0    # ¿?
 
-object2:
-    wavelength : 8250.0 # amstrong
-    image_filter: tophat
-    cutoff : [0.75, 0.80]
-    s_u_joint: 250.0
+# object2:
+#     wavelength : 8250.0 # amstrong
+#     image_filter: tophat
+#     cutoff : [0.75, 0.80]
+#     s_u_joint: 250.0
 
 optimization:
     gpu : 0
