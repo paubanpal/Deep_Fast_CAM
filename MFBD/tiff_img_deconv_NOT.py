@@ -13,7 +13,7 @@ import torch
 #path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
 hpc_base_path = Path("/scratch/paulabp/TFM/images/NOT/original/")
 path_folder = hpc_base_path / "binarias"
-path = path_folder / "55Uma_NOT.tif"
+path = path_folder / "CHR181_NOT_cropped.tif"
 #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
 #print(path.exists())
 
