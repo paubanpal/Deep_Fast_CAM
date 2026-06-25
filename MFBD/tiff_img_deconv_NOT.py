@@ -7,21 +7,9 @@ import torchmfbd
 import torch
 
 
-# We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)
-
-# Pathlib handles the slashes and spacing logic for you (for spaces and accents in path)
-#path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
-hpc_base_path = Path("/scratch/paulabp/TFM/images/NOT/original/")
-star_type = ["binarias", "dudosas-binarias", "simples"]
-
-for star in star_type:
-    path_folder = hpc_base_path / star
-    path = path_folder / "CHR181_NOT_cropped.tif"
-    #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
-    #print(path.exists())
-
+def read_and_deconvolve(path_image, path_folder):
     # Load the image
-    img_stack = tiff.imread(path)
+    img_stack = tiff.imread(path_image)
     #print(img_stack.shape)
 
     n_seq = 1      # Number of sequences
@@ -55,9 +43,47 @@ for star in star_type:
                  simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
                  n_iterations=20)
 
-        name = path.stem + '_' + i + '_MFBD' + path.suffix
+        name = path_image.stem + '_' + i + '_MFBD' + path_image.suffix
         final_path = path_folder / name
         deconv.write(final_path)
+
+
+# We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)
+
+# Pathlib handles the slashes and spacing logic for you (for spaces and accents in path)
+#path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
+hpc_base_path = Path("/scratch/paulabp/TFM/images/NOT/original/")
+star_type = ["binarias", "dudosas-binarias", "simples"]
+images_binarias = ["55Uma_NOT_cropped.tif", "CHR181_NOT_cropped.tif"]
+images_dud_binarias = ["wds14514_NOT_cropped.tif"]
+images_simples = ["COU1987_I_20240124_NOT_max_3s_100p_selected_500_cropped.tif", "KUI48_I_20240124_NOT_max_3s_100p_selected_500_cropped.tif"]
+
+for star in star_type:
+    path_folder = hpc_base_path / star
+    
+    if star == "binarias":
+        for image in images_binarias:
+            path_image = path_folder / image
+            #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
+            #print(path.exists())
+
+            read_and_deconvolve(path_image, path_folder)
+    if star == "dudosas-binarias":
+        for image in images_dud_binarias:
+            path_image = path_folder / image
+            #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
+            #print(path.exists())
+
+            read_and_deconvolve(path_image, path_folder)
+    if star == "simples":
+        for image in images_simples:
+            path_image = path_folder / image
+            #path = Path("I:\Departamentos\Óptica\paulabp\master\TFM\Lucky Imaging Miguel\imagenes LI\simples\FK384_cropped.tif")
+            #print(path.exists())
+
+            read_and_deconvolve(path_image, path_folder)
+
+    
 
 
 """
