@@ -32,8 +32,8 @@ def read_and_deconvolve(path_image, path_folder):
 
         decSI.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
-                 simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
-                 n_iterations=200)
+                 simultaneous_sequences=150, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
+                 n_iterations=250)
         
         fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
         for i in range(4):
