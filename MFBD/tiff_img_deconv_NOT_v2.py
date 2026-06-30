@@ -14,7 +14,7 @@ def read_and_deconvolve(path_image, path_folder):
     img_stack = tiff.imread(path_image)
     #print(img_stack.shape)
 
-    n_images = [1, 10]
+    n_images = [10, 20]
     #n_images = [10, 20, 50, 90, 200, 500]
 
     for i in n_images:
