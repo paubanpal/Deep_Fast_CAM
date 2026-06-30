@@ -36,8 +36,8 @@ def read_and_deconvolve(path_image, path_folder):
                  n_iterations=250)
         
         fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
-        for i in range(4):
-            ax[i].imshow(frames[i, ...], cmap = 'gray')
+        for j in range(3):
+            ax[j].imshow(frames[j, ...], cmap = 'gray')
 
         ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
 
