@@ -51,8 +51,10 @@ def read_and_deconvolve(path_image, path_folder):
 # Pathlib handles the slashes and spacing logic for you (for spaces and accents in path)
 #path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/Lucky Imaging Miguel/imagenes LI/simples/FK384_cropped.tif")    # path en windows
 hpc_base_path = Path("/scratch/paulabp/TFM/images/NOT/original/")
-star_type = ["binarias", "dudosas-binarias", "simples"]
-images_binarias = ["55Uma_NOT_cropped.tif", "CHR181_NOT_cropped.tif"]
+star_type = ["binarias"]
+#star_type = ["binarias", "dudosas-binarias", "simples"]
+images_binarias = ["55Uma_NOT_cropped.tif"]
+#images_binarias = ["55Uma_NOT_cropped.tif", "CHR181_NOT_cropped.tif"]
 images_dud_binarias = ["wds14514_NOT_cropped.tif"]
 images_simples = ["COU1987_I_20240124_NOT_max_3s_100p_selected_500_cropped.tif", "KUI48_I_20240124_NOT_max_3s_100p_selected_500_cropped.tif"]
 
