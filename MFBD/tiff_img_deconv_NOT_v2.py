@@ -21,41 +21,36 @@ class PyTorchPatchify:
     @staticmethod
     def patchify(tensor, patch_size=64, stride_size=50):
         """
-        Slices a PyTorch tensor into overlapping patches and flattens them.
-        Expects tensor shape: (batch/sequence, channels, height, width) 
-        or adjusted for your specific 5D 'frames' tensor dimensions.
+        Slices a 3D PyTorch tensor [C, H, W] into overlapping patches and flattens them.
         """
-        # Assuming frames shape structure from your code allows extracting H and W from last 2 dims
-        B, C, _, H, W = tensor.shape 
+        # Expecting a 3D tensor: Channels/Batch, Height, Width
+        C, H, W = tensor.shape 
         
-        # Reshape or squeeze to 4D for unfold if needed
-        # We process frame by frame or batch them together
-        tensor_4d = tensor.view(-1, C, H, W) 
+        # Add a dummy batch dimension to make it 4D for the unfold operation [1, C, H, W]
+        tensor_4d = tensor.unsqueeze(0) 
         
         # Unfold extracts sliding local blocks
         patches = tensor_4d.unfold(2, patch_size, stride_size).unfold(3, patch_size, stride_size)
-        # Permute and reshape to flatten the patch sequences matching patchify's structure
-        # Shape: (Num_Patches, Channels, patch_size, patch_size)
+        
+        # Permute and reshape to flatten the patch sequences
+        # Shape becomes: (Num_Patches, C, patch_size, patch_size)
         patches = patches.contiguous().view(-1, C, patch_size, patch_size)
         return patches
 
     @staticmethod
     def unpatchify(patches, output_shape, patch_size=64, stride_size=50, apodization=0):
         """
-        Reconstructs the original tensor from overlapping patches using Fold.
-        Applies basic linear/cosine windowing if apodization > 0 to smooth edges.
+        Reconstructs the original 3D tensor [C, H, W] from overlapping patches using Fold.
         """
-        B, C, _, H, W = output_shape
-        # Create a PyTorch Fold operation
+        C, H, W = output_shape
+        
+        # PyTorch Fold operation expects an explicit batch dimension, so we treat C as B*C
         fold = torch.nn.Fold(output_size=(H, W), kernel_size=(patch_size, patch_size), stride=(stride_size, stride_size))
         
-        # Prepare patches back to the shape Fold expects: (BxC, patch_size*patch_size, Num_Patches)
-        # Note: Depending on torchmfbd's output, you may need to adjust view parameters here
-        num_patches = ( (H - patch_size) // stride_size + 1 ) * ( (W - patch_size) // stride_size + 1 )
+        num_patches = ((H - patch_size) // stride_size + 1) * ((W - patch_size) // stride_size + 1)
         
-        # If apodization is used, we generate a basic weight mask to handle overlapping division
-        # If apodization=0, we just divide by a counting matrix to average the overlaps
-        patches_reshaped = patches.view(B * C, num_patches, patch_size * patch_size).permute(0, 2, 1)
+        # Prepare patches back to the shape Fold expects: (C, patch_size*patch_size, Num_Patches)
+        patches_reshaped = patches.view(C, num_patches, patch_size * patch_size).permute(0, 2, 1)
         
         reconstructed = fold(patches_reshaped)
         
@@ -65,7 +60,9 @@ class PyTorchPatchify:
         
         # Divide by overlap counts to smooth out intensity spikes
         final_tensor = reconstructed / (col_mask + 1e-8)
-        return final_tensor.view(B, C, H, W)
+        
+        # Remove any extra squeeze dimensions to match original 3D shape [C, H, W]
+        return final_tensor.view(C, H, W)
 
 
 def read_and_deconvolve(path_image, path_folder):
@@ -89,7 +86,7 @@ def read_and_deconvolve(path_image, path_folder):
         # patches = extract_patches_2d(frames, (64, 64))
         # decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
 
-        frames_patches = PyTorchPatchify.patchify(frames[:, :, :, :, :], patch_size=64, stride_size=50)
+        frames_patches = PyTorchPatchify.patchify(frames[:, :, :], patch_size=64, stride_size=50)
         decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
 
 
