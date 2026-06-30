@@ -14,40 +14,36 @@ def read_and_deconvolve(path_image, path_folder):
     img_stack = tiff.imread(path_image)
     #print(img_stack.shape)
 
-    n_seq = 1      # Number of sequences
-    n_obj = 1      # Number of objects
-    n_frm = img_stack.shape[0]     # Number of frames per object/sequence
-    h, w = img_stack.shape[1], img_stack.shape[2]
-
-    n_images = [10, 20, 50, 90, 200, 500]
+    n_images = 10
+    #n_images = [10, 20, 50, 90, 200, 500]
 
     for i in n_images:
-        # Reshape to MFBD format
-        img_stack_MFBD = img_stack.reshape((n_seq, n_obj, n_frm, h, w))
-        img_stack_MFBD = img_stack_MFBD[:, :, :i, :, :]
-        #print(img_stack_MFBD.shape)
+        frames = torch.tensor(img_stack[0:i, ...], dtype = torch.float32)
+        frames /= frames.max()
 
         # Deconvolution process
         script_dir = Path(__file__).resolve().parent
         config_path = script_dir / 'config_NOT_yaml.yaml'
-        deconv = torchmfbd.Deconvolution(str(config_path))
+        decSI = torchmfbd.Deconvolution(str(config_path))
 
-        # Convert your NumPy array to a PyTorch Tensor
-        torch_tensor_stack = torch.from_numpy(img_stack_MFBD).float()
+        # Patchify and add the frames
+        decSI.add_frames(frames[None, ...], id_object = 0, id_diversity = 0, diversity = 0.0)
 
-        # Squeeze out the 'n_obj' dimension (dimension index 1) to make it 4D:
-        # (1, 1, 10, 128, 128) becomes (1, 10, 128, 128)
-        torch_tensor_stack_4d = torch_tensor_stack.squeeze(1)
-        deconv.add_frames(torch_tensor_stack_4d)
 
-        deconv.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
+        decSI.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
                  simultaneous_sequences=16, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
                  n_iterations=20)
+        
+        fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
+        for i in range(4):
+            ax[i].imshow(frames[i, ...], cmap = 'gray')
+
+        ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
 
         name = path_image.stem + '_' + i + '_MFBD' + path_image.suffix
         final_path = path_folder / name
-        deconv.write(final_path)
+        decSI.write(final_path)
 
 
 # We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)

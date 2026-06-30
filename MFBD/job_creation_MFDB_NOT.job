@@ -11,8 +11,7 @@
 #SBATCH --mail-type=BEGIN,END
 #SBATCH --mail-user=paula.banares@iac.es
 
-module load cuda/12.1 2>/dev/null || true
-
+source /home/paulabp/miniconda3/etc/profile.d/conda.sh
 conda activate tfm_conda_venv
 
-python tiff_img_deconv_NOT.py
+srun python tiff_img_deconv_NOT.py

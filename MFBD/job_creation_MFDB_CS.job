@@ -12,6 +12,7 @@
 #SBATCH --mail-user=paula.banares@iac.es
 
 
+source /home/paulabp/miniconda3/etc/profile.d/conda.sh
 conda activate tfm_conda_venv
 
-python tiff_img_deconv_CS.py 
+srun python tiff_img_deconv_CS.py 
