@@ -86,8 +86,8 @@ def read_and_deconvolve(path_image, path_folder):
         decSI = torchmfbd.Deconvolution(str(config_path))
 
         
-        patches = extract_patches_2d(frames, (64, 64))
-        decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
+        # patches = extract_patches_2d(frames, (64, 64))
+        # decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
 
         frames_patches = PyTorchPatchify.patchify(frames[:, :, :, :, :], patch_size=64, stride_size=50)
         decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
