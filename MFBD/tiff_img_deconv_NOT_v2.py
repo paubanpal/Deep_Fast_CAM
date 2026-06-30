@@ -5,8 +5,67 @@ from pathlib import Path
 import numpy as np
 import torchmfbd
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as pl
+from sklearn.feature_extraction.image import extract_patches_2d
+import scipy
+import tqdm
+import skimage
+import sklearn
+import nvitop
+import yaml
+import einops
+import dict_hash
 
+class PyTorchPatchify:
+    @staticmethod
+    def patchify(tensor, patch_size=64, stride_size=50):
+        """
+        Slices a PyTorch tensor into overlapping patches and flattens them.
+        Expects tensor shape: (batch/sequence, channels, height, width) 
+        or adjusted for your specific 5D 'frames' tensor dimensions.
+        """
+        # Assuming frames shape structure from your code allows extracting H and W from last 2 dims
+        B, C, _, H, W = tensor.shape 
+        
+        # Reshape or squeeze to 4D for unfold if needed
+        # We process frame by frame or batch them together
+        tensor_4d = tensor.view(-1, C, H, W) 
+        
+        # Unfold extracts sliding local blocks
+        patches = tensor_4d.unfold(2, patch_size, stride_size).unfold(3, patch_size, stride_size)
+        # Permute and reshape to flatten the patch sequences matching patchify's structure
+        # Shape: (Num_Patches, Channels, patch_size, patch_size)
+        patches = patches.contiguous().view(-1, C, patch_size, patch_size)
+        return patches
+
+    @staticmethod
+    def unpatchify(patches, output_shape, patch_size=64, stride_size=50, apodization=0):
+        """
+        Reconstructs the original tensor from overlapping patches using Fold.
+        Applies basic linear/cosine windowing if apodization > 0 to smooth edges.
+        """
+        B, C, _, H, W = output_shape
+        # Create a PyTorch Fold operation
+        fold = torch.nn.Fold(output_size=(H, W), kernel_size=(patch_size, patch_size), stride=(stride_size, stride_size))
+        
+        # Prepare patches back to the shape Fold expects: (BxC, patch_size*patch_size, Num_Patches)
+        # Note: Depending on torchmfbd's output, you may need to adjust view parameters here
+        num_patches = ( (H - patch_size) // stride_size + 1 ) * ( (W - patch_size) // stride_size + 1 )
+        
+        # If apodization is used, we generate a basic weight mask to handle overlapping division
+        # If apodization=0, we just divide by a counting matrix to average the overlaps
+        patches_reshaped = patches.view(B * C, num_patches, patch_size * patch_size).permute(0, 2, 1)
+        
+        reconstructed = fold(patches_reshaped)
+        
+        # Create normalization mask to account for overlap accumulation
+        ones = torch.ones_like(patches_reshaped)
+        col_mask = fold(ones)
+        
+        # Divide by overlap counts to smooth out intensity spikes
+        final_tensor = reconstructed / (col_mask + 1e-8)
+        return final_tensor.view(B, C, H, W)
 
 
 def read_and_deconvolve(path_image, path_folder):
@@ -26,8 +85,16 @@ def read_and_deconvolve(path_image, path_folder):
         config_path = script_dir / 'config_NOT_yaml.yaml'
         decSI = torchmfbd.Deconvolution(str(config_path))
 
+        
+        patches = extract_patches_2d(frames, (64, 64))
+        decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
+
+        frames_patches = PyTorchPatchify.patchify(frames[:, :, :, :, :], patch_size=64, stride_size=50)
+        decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
+
+
         # Patchify and add the frames
-        decSI.add_frames(frames[None, ...], id_object = 0, id_diversity = 0, diversity = 0.0)
+        #decSI.add_frames(frames[None, ...], id_object = 0, id_diversity = 0, diversity = 0.0)
 
 
         decSI.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
@@ -35,11 +102,25 @@ def read_and_deconvolve(path_image, path_folder):
                  simultaneous_sequences=150, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
                  n_iterations=250)
         
-        fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
-        for j in range(3):
-            ax[j].imshow(frames[j, ...], cmap = 'gray')
+        obj = []
+        frames_back = []
+        for j in range(1):
+            orig_shape = frames[:, j, :, :, :].shape
+    
+            obj.append(PyTorchPatchify.unpatchify(decSI.obj[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=6).cpu().numpy())
+            frames_back.append(PyTorchPatchify.unpatchify(frames_patches[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=0).cpu().numpy())
 
-        ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
+        npix = obj[0][0, :, :].shape[0]
+        fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
+        for j in range(2):
+            ax[0, j].imshow(frames[0, j, 0, 0:npix, 0:npix])
+            ax[1, j].imshow(obj[i][0, :, :])
+        
+        # fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
+        # for j in range(2):
+        #     ax[j].imshow(frames[j, ...], cmap = 'gray')
+
+        # ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
 
         name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
         final_path = path_folder / name
