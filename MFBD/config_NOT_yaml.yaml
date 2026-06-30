@@ -43,6 +43,7 @@ regularization:
 psf:
     model : kl
     nmax_modes : 44
+    n_pixel: 128
     #n_pixel: 512    # 128 por defecto
 
 initialization:
