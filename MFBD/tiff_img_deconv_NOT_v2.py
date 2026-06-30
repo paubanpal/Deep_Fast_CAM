@@ -41,7 +41,7 @@ def read_and_deconvolve(path_image, path_folder):
 
         ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
 
-        name = path_image.stem + '_' + i + '_MFBD' + path_image.suffix
+        name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
         final_path = path_folder / name
         decSI.write(final_path)
 
