@@ -94,25 +94,40 @@ def read_and_deconvolve(path_image, path_folder):
         obj = []
         frames_back = []
         
-        # FIX 1: We pull the dimensions of the original 3D input stack [C, H, W]
-        orig_shape = frames[:, :, :].shape
+        orig_shape = frames[:, :, :].shape  # Expecting [num_images, H, W]
         
-        # FIX 2: Corrected index from 'decSI.obj[i]' to 'decSI.obj[0]' 
-        # decSI.obj contains the optimized patches for the current run, indexed by object id (0)
-        obj.append(PyTorchPatchify.unpatchify(decSI.obj[0], output_shape=orig_shape, patch_size=128, stride_size=50, apodization=6).cpu().numpy())
+        # FIX 1: Map decSI.obj[0] directly. It is already standard image shape data!
+        # We just ensure it is shaped as [num_images, H, W] or whatever shape it provides natively.
+        deconv_output = decSI.obj[0].detach()
+        if deconv_output.ndim == 2:
+            # If it returns a single 2D composite image, expand it to match the plotting expected format
+            deconv_output = deconv_output.unsqueeze(0)
+            
+        obj.append(deconv_output.cpu().numpy())
         
-        # FIX 3: Corrected patch reconstruction size from 64 to 128, and index to 'frames_patches' directly
-        frames_back.append(PyTorchPatchify.unpatchify(frames_patches, output_shape=orig_shape, patch_size=128, stride_size=50, apodization=0).cpu().numpy())
+        # FIX 2: Reconstruct the raw background frames_patches cleanly
+        reconstructed_back = PyTorchPatchify.unpatchify(
+            frames_patches, 
+            output_shape=orig_shape, 
+            patch_size=128, 
+            stride_size=50, 
+            apodization=0
+        )
+        frames_back.append(reconstructed_back.cpu().numpy())
 
-        # Pull reconstructed array image dimensions
-        npix = obj[0][0, :, :].shape[0]
+        # Pull plot visualization boundaries
+        npix = orig_shape[1] # Use height of the frame
         fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
         
-        # FIX 4: Corrected 3D matrix visualization indices
-        # frames is 3D [image_idx, H, W]. Slicing frames[0, j, 0, ...] was crashing with 5D indexing.
+        # FIX 3: Clean, robust 3D matrix visualization plotting loops
         for j in range(2):
-            ax[0, j].imshow(frames[j, 0:npix, 0:npix].cpu().numpy(), cmap='gray')
-            ax[1, j].imshow(obj[0][j, 0:npix, 0:npix], cmap='gray') # Plots the deconvolved channels
+            ax[0, j].imshow(frames[j, :, :].cpu().numpy(), cmap='gray')
+            
+            # Checks if obj contains multiple frames or just 1 frame to prevent out-of-bounds indexing
+            if obj[0].shape[0] > j:
+                ax[1, j].imshow(obj[0][j, :, :], cmap='gray')
+            else:
+                ax[1, j].imshow(obj[0][0, :, :], cmap='gray') # Fallback to first deconv item
         
         # Save output
         name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
