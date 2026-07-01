@@ -202,10 +202,24 @@ def read_and_deconvolve(path_image, path_folder):
                 ax[1, j].imshow(obj[0][0, 0:npix, 0:npix], cmap='gray')
             ax[1, j].set_title(f"Deconvolved Scene Object")
         
-        # 5. Save the output FITS file via torchmfbd built-in writer
-        name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
+        # 5. Save the default internal library weights (the 44x10 matrix)
+        name = path_image.stem + '_' + str(i) + '_MFBD_weights' + path_image.suffix
         final_path = path_folder / name
         decSI.write(final_path)
+
+        # ========================================================
+        # NEW ADDITION: Save the actual 128x128 restored image!
+        # ========================================================
+        # obj[0] contains the numpy array of shape (1, 128, 128)
+        # We slice obj[0][0] to get the clean 2D image matrix (128x128)
+        final_image_data = obj[0][0]
+        
+        # Build a new name for the actual image file
+        image_name = path_image.stem + '_' + str(i) + '_MFBD_RECONSTRUCTED' + path_image.suffix
+        image_final_path = path_folder / image_name
+        
+        # Save using the tiff package you imported at the top of your script
+        tiff.imwrite(image_final_path, final_image_data.astype(np.float32))
 
 # def read_and_deconvolve(path_image, path_folder):
 #     # Load the image
