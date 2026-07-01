@@ -68,12 +68,12 @@ class PyTorchPatchify:
 def read_and_deconvolve(path_image, path_folder):
     # Load the image
     img_stack = tiff.imread(path_image)
-    #print(img_stack.shape)
 
     n_images = [10, 20]
     #n_images = [10, 20, 50, 90, 200, 500]
 
     for i in n_images:
+        # frames shape: [i, H, W] -> 3D tensor
         frames = torch.tensor(img_stack[0:i, ...], dtype = torch.float32)
         frames /= frames.max()
 
@@ -82,46 +82,100 @@ def read_and_deconvolve(path_image, path_folder):
         config_path = script_dir / 'config_NOT_yaml.yaml'
         decSI = torchmfbd.Deconvolution(str(config_path))
 
-        
-        # patches = extract_patches_2d(frames, (64, 64))
-        # decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
-
+        # Create patches using size 128
         frames_patches = PyTorchPatchify.patchify(frames[:, :, :], patch_size=128, stride_size=50)
         decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
 
-
-        # Patchify and add the frames
-        #decSI.add_frames(frames[None, ...], id_object = 0, id_diversity = 0, diversity = 0.0)
-
-
-        decSI.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
-                 optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
-                 simultaneous_sequences=150, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
-                 n_iterations=250)
+        decSI.deconvolve(infer_object=False,   
+                         optimizer='adam',  
+                         simultaneous_sequences=150, 
+                         n_iterations=250)
         
         obj = []
         frames_back = []
-        for j in range(1):
-            orig_shape = frames[:, j, :, :, :].shape
-    
-            obj.append(PyTorchPatchify.unpatchify(decSI.obj[i], output_shape=orig_shape, patch_size=128, stride_size=50, apodization=6).cpu().numpy())
-            frames_back.append(PyTorchPatchify.unpatchify(frames_patches[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=0).cpu().numpy())
+        
+        # FIX 1: We pull the dimensions of the original 3D input stack [C, H, W]
+        orig_shape = frames[:, :, :].shape
+        
+        # FIX 2: Corrected index from 'decSI.obj[i]' to 'decSI.obj[0]' 
+        # decSI.obj contains the optimized patches for the current run, indexed by object id (0)
+        obj.append(PyTorchPatchify.unpatchify(decSI.obj[0], output_shape=orig_shape, patch_size=128, stride_size=50, apodization=6).cpu().numpy())
+        
+        # FIX 3: Corrected patch reconstruction size from 64 to 128, and index to 'frames_patches' directly
+        frames_back.append(PyTorchPatchify.unpatchify(frames_patches, output_shape=orig_shape, patch_size=128, stride_size=50, apodization=0).cpu().numpy())
 
+        # Pull reconstructed array image dimensions
         npix = obj[0][0, :, :].shape[0]
         fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
-        for j in range(2):
-            ax[0, j].imshow(frames[0, j, 0, 0:npix, 0:npix])
-            ax[1, j].imshow(obj[i][0, :, :])
         
-        # fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
-        # for j in range(2):
-        #     ax[j].imshow(frames[j, ...], cmap = 'gray')
-
-        # ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
-
+        # FIX 4: Corrected 3D matrix visualization indices
+        # frames is 3D [image_idx, H, W]. Slicing frames[0, j, 0, ...] was crashing with 5D indexing.
+        for j in range(2):
+            ax[0, j].imshow(frames[j, 0:npix, 0:npix].cpu().numpy(), cmap='gray')
+            ax[1, j].imshow(obj[0][j, 0:npix, 0:npix], cmap='gray') # Plots the deconvolved channels
+        
+        # Save output
         name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
         final_path = path_folder / name
         decSI.write(final_path)
+
+# def read_and_deconvolve(path_image, path_folder):
+#     # Load the image
+#     img_stack = tiff.imread(path_image)
+#     #print(img_stack.shape)
+
+#     n_images = [10, 20]
+#     #n_images = [10, 20, 50, 90, 200, 500]
+
+#     for i in n_images:
+#         frames = torch.tensor(img_stack[0:i, ...], dtype = torch.float32)
+#         frames /= frames.max()
+
+#         # Deconvolution process
+#         script_dir = Path(__file__).resolve().parent
+#         config_path = script_dir / 'config_NOT_yaml.yaml'
+#         decSI = torchmfbd.Deconvolution(str(config_path))
+
+        
+#         # patches = extract_patches_2d(frames, (64, 64))
+#         # decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
+
+#         frames_patches = PyTorchPatchify.patchify(frames[:, :, :], patch_size=128, stride_size=50)
+#         decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
+
+
+#         # Patchify and add the frames
+#         #decSI.add_frames(frames[None, ...], id_object = 0, id_diversity = 0, diversity = 0.0)
+
+
+#         decSI.deconvolve(infer_object=False,   # If False, the object is inferred using the analytic solution given by the Wiener filter. Otherwise, the object is inferred by the optimizer.
+#                  optimizer='adam',  # "adam" (first order) or "lbfgs" (second order L-BFGS, that is more memory and time consuming but more efficient in terms of number of iterations)
+#                  simultaneous_sequences=150, # The number of patches to deconvolve simultaneously. If you have plenty of VRAM, you can increase this number to speed up the deconvolution.
+#                  n_iterations=250)
+        
+#         obj = []
+#         frames_back = []
+#         for j in range(1):
+#             orig_shape = frames[:, :, :].shape
+    
+#             obj.append(PyTorchPatchify.unpatchify(decSI.obj[i], output_shape=orig_shape, patch_size=128, stride_size=50, apodization=6).cpu().numpy())
+#             frames_back.append(PyTorchPatchify.unpatchify(frames_patches[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=0).cpu().numpy())
+
+#         npix = obj[0][0, :, :].shape[0]
+#         fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
+#         for j in range(2):
+#             ax[0, j].imshow(frames[0, j, 0, 0:npix, 0:npix])
+#             ax[1, j].imshow(obj[i][0, :, :])
+        
+#         # fig, ax = pl.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
+#         # for j in range(2):
+#         #     ax[j].imshow(frames[j, ...], cmap = 'gray')
+
+#         # ax[-1].imshow(decSI.obj[0][0, ...].cpu().numpy(), cmap = 'gray')
+
+#         name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
+#         final_path = path_folder / name
+#         decSI.write(final_path)
 
 
 # We start from a set of frames of shape (n_sequences, n_objects, n_frames, n_pixel, n_pixel)
