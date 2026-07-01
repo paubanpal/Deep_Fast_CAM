@@ -86,7 +86,7 @@ def read_and_deconvolve(path_image, path_folder):
         # patches = extract_patches_2d(frames, (64, 64))
         # decSI.add_frames(patches[j], id_object = 0, id_diversity = 0, diversity = 0.0)
 
-        frames_patches = PyTorchPatchify.patchify(frames[:, :, :], patch_size=64, stride_size=30)
+        frames_patches = PyTorchPatchify.patchify(frames[:, :, :], patch_size=128, stride_size=50)
         decSI.add_frames(frames_patches, id_object=0, id_diversity=0, diversity=0.0)
 
 
@@ -104,7 +104,7 @@ def read_and_deconvolve(path_image, path_folder):
         for j in range(1):
             orig_shape = frames[:, j, :, :, :].shape
     
-            obj.append(PyTorchPatchify.unpatchify(decSI.obj[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=6).cpu().numpy())
+            obj.append(PyTorchPatchify.unpatchify(decSI.obj[i], output_shape=orig_shape, patch_size=128, stride_size=50, apodization=6).cpu().numpy())
             frames_back.append(PyTorchPatchify.unpatchify(frames_patches[i], output_shape=orig_shape, patch_size=64, stride_size=50, apodization=0).cpu().numpy())
 
         npix = obj[0][0, :, :].shape[0]
