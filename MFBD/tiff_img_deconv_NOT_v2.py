@@ -160,7 +160,19 @@ def read_and_deconvolve(path_image, path_folder):
         if deconv_output.ndim == 2:
             deconv_output = deconv_output.unsqueeze(0)
             
-        obj.append(deconv_output.cpu().numpy())
+        # Check if the output is a raw 2D image (128, 128) and expand for uniform plotting loops
+        if hasattr(deconv_output, 'ndim') and deconv_output.ndim == 2:
+            # We handle it safely depending on whether it's PyTorch or NumPy
+            if isinstance(deconv_output, torch.Tensor):
+                deconv_output = deconv_output.unsqueeze(0)
+            else:
+                deconv_output = np.expand_dims(deconv_output, axis=0)
+            
+        # SAFE CONVERSION: Only call .cpu() if it's actually a PyTorch Tensor
+        if isinstance(deconv_output, torch.Tensor):
+            obj.append(deconv_output.cpu().numpy())
+        else:
+            obj.append(deconv_output) # It's already a NumPy array!
         # ========================================================
 
         # 3. Unpatchify your original background frames for the visualization comparison
