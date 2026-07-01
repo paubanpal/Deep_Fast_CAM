@@ -91,21 +91,79 @@ def read_and_deconvolve(path_image, path_folder):
                          simultaneous_sequences=150, 
                          n_iterations=250)
         
+        # obj = []
+        # frames_back = []
+        
+        # orig_shape = frames[:, :, :].shape  # Expecting [num_images, H, W]
+        
+        # # FIX 1: Map decSI.obj[0] directly. It is already standard image shape data!
+        # # We just ensure it is shaped as [num_images, H, W] or whatever shape it provides natively.
+        # deconv_output = decSI.obj[0].detach()
+        # if deconv_output.ndim == 2:
+        #     # If it returns a single 2D composite image, expand it to match the plotting expected format
+        #     deconv_output = deconv_output.unsqueeze(0)
+            
+        # obj.append(deconv_output.cpu().numpy())
+        
+        # # FIX 2: Reconstruct the raw background frames_patches cleanly
+        # reconstructed_back = PyTorchPatchify.unpatchify(
+        #     frames_patches, 
+        #     output_shape=orig_shape, 
+        #     patch_size=128, 
+        #     stride_size=50, 
+        #     apodization=0
+        # )
+        # frames_back.append(reconstructed_back.cpu().numpy())
+
+        # # Pull plot visualization boundaries
+        # npix = orig_shape[1] # Use height of the frame
+        # fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
+        
+        # # FIX 3: Clean, robust 3D matrix visualization plotting loops
+        # for j in range(2):
+        #     ax[0, j].imshow(frames[j, :, :].cpu().numpy(), cmap='gray')
+            
+        #     # Checks if obj contains multiple frames or just 1 frame to prevent out-of-bounds indexing
+        #     if obj[0].shape[0] > j:
+        #         ax[1, j].imshow(obj[0][j, :, :], cmap='gray')
+        #     else:
+        #         ax[1, j].imshow(obj[0][0, :, :], cmap='gray') # Fallback to first deconv item
+        
+        # # Save output
+        # name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
+        # final_path = path_folder / name
+        # decSI.write(final_path)
+
         obj = []
         frames_back = []
+        orig_shape = frames[:, :, :].shape  # [10, 128, 128]
         
-        orig_shape = frames[:, :, :].shape  # Expecting [num_images, H, W]
-        
-        # FIX 1: Map decSI.obj[0] directly. It is already standard image shape data!
-        # We just ensure it is shaped as [num_images, H, W] or whatever shape it provides natively.
-        deconv_output = decSI.obj[0].detach()
+        # TRY THIS: Pull the reconstructed scene object directly
+        # If it's a method, use decSI.get_object(). If it's a property, use decSI.object_scene
+        if hasattr(decSI, 'get_object'):
+            deconv_output = decSI.get_object()
+        elif hasattr(decSI, 'object'):
+            deconv_output = decSI.object
+        else:
+            # Fallback if it is inside obj but structured as [modes, frames]
+            # We take the mean or look for the diffraction-limited version
+            deconv_output = decSI.obj_diffraction[0] if hasattr(decSI, 'obj_diffraction') else decSI.obj[0]
+
+        # Ensure it is detached and converted cleanly
+        if isinstance(deconv_output, torch.Tensor):
+            deconv_output = deconv_output.detach().cpu().numpy()
+            
+        # Debug print to your HPC terminal so you can verify the shape is now 128x128
+        print(f"--- SUCCESS! Reconstructed Image Shape for {i} frames: {deconv_output.shape} ---")
+
+        # Check if the output is a raw 2D image (128, 128) and expand for uniform plotting loops
         if deconv_output.ndim == 2:
-            # If it returns a single 2D composite image, expand it to match the plotting expected format
             deconv_output = deconv_output.unsqueeze(0)
             
         obj.append(deconv_output.cpu().numpy())
-        
-        # FIX 2: Reconstruct the raw background frames_patches cleanly
+        # ========================================================
+
+        # 3. Unpatchify your original background frames for the visualization comparison
         reconstructed_back = PyTorchPatchify.unpatchify(
             frames_patches, 
             output_shape=orig_shape, 
@@ -115,21 +173,24 @@ def read_and_deconvolve(path_image, path_folder):
         )
         frames_back.append(reconstructed_back.cpu().numpy())
 
-        # Pull plot visualization boundaries
-        npix = orig_shape[1] # Use height of the frame
+        # 4. Set up the plotting window boundaries based on our real 128x128 shape
+        npix = orig_shape[1] 
         fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
         
-        # FIX 3: Clean, robust 3D matrix visualization plotting loops
+        # Plot 2 original raw frames vs our reconstructed deconvolution matrix
         for j in range(2):
+            # Row 0: Original degraded short-exposure frames
             ax[0, j].imshow(frames[j, :, :].cpu().numpy(), cmap='gray')
+            ax[0, j].set_title(f"Degraded Frame {j+1}")
             
-            # Checks if obj contains multiple frames or just 1 frame to prevent out-of-bounds indexing
+            # Row 1: Deconvolved output (mapped safely to your 128x128 array grid)
             if obj[0].shape[0] > j:
-                ax[1, j].imshow(obj[0][j, :, :], cmap='gray')
+                ax[1, j].imshow(obj[0][j, 0:npix, 0:npix], cmap='gray')
             else:
-                ax[1, j].imshow(obj[0][0, :, :], cmap='gray') # Fallback to first deconv item
+                ax[1, j].imshow(obj[0][0, 0:npix, 0:npix], cmap='gray')
+            ax[1, j].set_title(f"Deconvolved Scene Object")
         
-        # Save output
+        # 5. Save the output FITS file via torchmfbd built-in writer
         name = path_image.stem + '_' + str(i) + '_MFBD' + path_image.suffix
         final_path = path_folder / name
         decSI.write(final_path)
