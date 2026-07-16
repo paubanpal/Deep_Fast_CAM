@@ -10,12 +10,11 @@ import os
 from tqdm import tqdm
 import argparse
 import scipy.ndimage as nd
-import dataset
 try:
-    from nvitop import Device
-    HAS_NVITOP = True
+    import nvidia_smi
+    NVIDIA_SMI = True
 except:
-    HAS_NVITOP = False
+    NVIDIA_SMI = False
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     """Save neural network state
@@ -50,9 +49,91 @@ def align(a, b):
 
     return(y,x)
 
+class Dataset(torch.utils.data.Dataset):
+    """
+    Dataset
+
+      Scripts to produce the training sets : db.py
+    
+    """
+    def __init__(self, filename, n_training_per_star=200, n_frames=10, validation=False):
+        super(Dataset, self).__init__()
+        
+        # Read the video with the images
+        self.filename = filename
+        self.f = h5py.File(self.filename, 'r')
+        self.datasets = [i for i in self.f.keys()]
+        # if (not validation):
+            # ind = [1, 13]
+            # self.datasets = [self.datasets[i] for i in ind]
+        self.n_training_per_star = n_training_per_star
+        self.n_datasets = len(self.datasets)
+        self.n_training = self.n_datasets * self.n_training_per_star
+        self.n_frames = n_frames
+
+        self.ind_time = []
+        self.ind_dataset = []
+
+        x, y = np.arange(128), np.arange(128)
+        self.xx, self.yy = np.meshgrid(x, y)
+
+        for dset in self.datasets:
+            n, _ = self.f[dset].shape
+            ind_time = np.random.randint(low=0, high=n-self.n_frames, size=self.n_training_per_star)
+            self.ind_dataset.extend([dset] * self.n_training_per_star)
+            self.ind_time.extend(ind_time)
+        
+        print(f"Number of training examples of {self.filename}: {self.n_training}")
+                
+    def __getitem__(self, index):
+        dset = self.ind_dataset[index]
+        low = self.ind_time[index]
+        high = self.ind_time[index] + self.n_frames
+        im = self.f[dset][low:high, :].reshape((self.n_frames, 128, 128))
+
+
+        rot = np.random.randint(low=0, high=4, size=1)
+        flipx = np.random.randint(low=0, high=2, size=1)
+        flipy = np.random.randint(low=0, high=2, size=1)
+        
+        im = np.rot90(im, rot[0], axes=(1,2))
+        if (flipx[0] == 1):
+            im = im[:, ::-1, :]
+        if (flipy[0] == 1):
+            im = im[:, :, ::-1]
+
+        max_im = np.max(im)
+        min_im = np.min(im)
+        
+        im = (im - min_im) / (max_im - min_im)
+
+        # im_aligned = np.zeros_like(im)
+        # im_aligned[0, :, :] = im[0, :, :]
+        # for i in range(self.n_frames-1):
+        #     sh = align(im[i, :, :], im[i+1, :, :])
+        #     im_aligned[i+1, :, :] = nd.interpolation.shift(im[i+1,:,:], sh, mode='wrap')
+
+        # im = np.copy(im_aligned)
+
+        # Make sure that the average is again at the center of the FOV
+        tmp = np.sum(im, axis=0)
+
+        delta = np.unravel_index(np.argmax(tmp), (128, 128))
+        im = np.roll(im, (64-delta[0], 64-delta[1]), axis=(1, 2))
+
+        ff = np.fft.fft2(im)
+        im_fft = np.concatenate([ff.real[:, :, :, None], ff.imag[:, :, :, None]], axis=-1)
+
+        variance = np.var(im[:, 0:10, 0:10])
+        
+        return im, im_fft, variance
+        
+    def __len__(self):
+        return self.n_training
+
 class Deconvolution(object):
     
-    def __init__(self, basis_wavefront='kl', npix_image=128, n_modes=44, n_frames=10, gpu=0, smooth=0.05,\
+    def __init__(self, basis_wavefront='zernike', npix_image=128, n_modes=44, n_frames=10, gpu=0, smooth=0.05,\
         batch_size=16, arguments=None):
 
         self.pixel_size = 0.0303
@@ -71,9 +152,10 @@ class Deconvolution(object):
         self.device = torch.device(f"cuda:{self.gpu}" if self.cuda else "cpu")
 
         # Ger handlers to later check memory and usage of GPUs
-        if (HAS_NVITOP):
-            self.handle = Device.all()[self.gpu]
-            print(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.gpu}")
+        if (NVIDIA_SMI):
+            nvidia_smi.nvmlInit()
+            self.handle = nvidia_smi.nvmlDeviceGetHandleByIndex(self.gpu)
+            print("Computing in {0} : {1}".format(gpu, nvidia_smi.nvmlDeviceGetName(self.handle)))
 
         # Define the neural network model
         print("Defining the model...")
@@ -83,7 +165,7 @@ class Deconvolution(object):
 
         print('N. total parameters : {0}'.format(sum(p.numel() for p in self.model.parameters() if p.requires_grad)))
 
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.cuda else {}
+        kwargs = {'num_workers': 1, 'pin_memory': False} if self.cuda else {}
         # Data loaders that will inject data during training
         self.training_dataset = Dataset(filename='/scratch1/aasensio/fastcam/training_small.h5', n_training_per_star=1000, n_frames=self.n_frames)
         self.train_loader = torch.utils.data.DataLoader(self.training_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True, **kwargs)

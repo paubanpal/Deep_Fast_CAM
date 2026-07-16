@@ -6,7 +6,7 @@ import torch.nn.init as init
 import util
 import zern
 import kl_modes
-from einops import rearrange, repeat
+from complex import complex_multiply_astar_b, complex_division
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -84,7 +84,6 @@ class Recurrentnet(nn.Module):
         self.n_lstm = n_lstm
         self.device = device
 
-        # Convolutional blocks of the encoder
         self.A01 = ConvBlock(1, n, kernel_size=9, bn=False, activation=False)
 
         self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
@@ -102,20 +101,22 @@ class Recurrentnet(nn.Module):
         self.C23 = ConvBlock(n, n, kernel_size=3)
         self.C24 = ConvBlock(n, n, kernel_size=3)
 
-        # Final convolutional block to reduce the number of channels to n_lstm. The kernel size is set to 16 so that the output has a size of 1x1
         kernel_size = 16
 
         self.C41 = nn.Conv2d(n, self.n_lstm, kernel_size=kernel_size, stride=1)
-
-        # LSTM (to be replaced by a Transformed encoder in the future)
-        # to couple the features extracted from all frames and provide a final vector of features per frame
-        self.lstm = nn.LSTM(self.n_lstm, self.n_lstm, batch_first=True, bidirectional=True, dropout=0.0)
         
-        # Final MLP to project the features extracted from the LSTM into the modal coefficients
         self.C42 = nn.Linear(2*self.n_lstm, self.n_lstm)
         self.C43 = nn.Linear(self.n_lstm, n_modes)
         
         self.elu = nn.ELU()
+
+        self.lstm = nn.LSTM(self.n_lstm, self.n_lstm, batch_first=True, bidirectional=True, dropout=0.0)
+
+        # x = np.linspace(0, 1, self.npix_image)
+        # y = np.linspace(0, 1, self.npix_image)
+        # xx, yy = np.meshgrid(x, y)
+        # self.xx = torch.tensor(xx.astype('float32')).to(self.device)
+        # self.yy = torch.tensor(yy.astype('float32')).to(self.device)
 
     def weights_init(self):
         for module in self.modules():
@@ -202,8 +203,6 @@ class Network(nn.Module):
         print(f"Central obscuration : {self.central_obscuration} cm")
         print(f"Pixel size : {self.pixel_size} arcsec")
 
-        # Compute PSF scale, which depends on the wavelength, telescope diameter and pixel size. This is used to compute the overfill of the pupil
-        # so that the final PSF has the correct pixel size
         self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
         if (self.overfill < 1.0):
             raise Exception(f"The pixel size is not small enough to model a telescope with D={self.telescope_diameter} cm")
@@ -212,7 +211,7 @@ class Network(nn.Module):
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
             
-        # Define the basis for the wavefront. This can be either Zernike or KL modes
+            # Define all KL modes
         if (self.basis_for_wavefront == 'zernike'):
             print("Computing Zernike modes...")
             Z_machine = zern.ZernikeNaive(mask=[])
@@ -237,19 +236,11 @@ class Network(nn.Module):
 
         zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
 
-        # Register buffers so that they are moved to the GPU when the model is moved to the GPU
         self.register_buffer('zeros', zeros)
         self.register_buffer('pupil', pupil)
         self.register_buffer('basis', torch.tensor(basis.astype('float32')))
 
-        # Define the neural network that will estimate the wavefront coefficients from a set of images
-        self.modalnet = Recurrentnet(in_planes=1, 
-                                     device=self.device, 
-                                     n_modes=self.n_modes, 
-                                     n_frames=self.n_frames, 
-                                     npix_image=self.npix_image, 
-                                     n=16, 
-                                     n_lstm=256).to(self.device)
+        self.modalnet = Recurrentnet(in_planes=1, device=self.device, n_modes=self.n_modes, n_frames=self.n_frames, npix_image=self.npix_image, n=16, n_lstm=256).to(self.device)
         self.modalnet.weights_init()
 
     def compute_psfs(self, coeff):
@@ -264,21 +255,27 @@ class Network(nn.Module):
         
         # Compute real and imaginary parts of the pupil
         wavefront = torch.einsum('ij,jkl->ikl', coeff, self.basis)
+        
+        tmp1 = torch.unsqueeze(torch.cos(wavefront) * self.pupil[None, :, :], -1)
+        tmp2 = torch.unsqueeze(torch.sin(wavefront) * self.pupil[None, :, :], -1)        
 
-        # Compute the generalized pupil function
-        phase = self.pupil[None, :, :] * torch.exp(1j * wavefront)
+        # Compute complex phase
+        phase = torch.cat([tmp1, tmp2], -1)
 
         # Compute FFT of the pupil function and compute autocorrelation
-        ft = torch.fft.fft2(phase)
-        psf = (torch.conj(ft) * ft).real
+        ft = torch.ifft(phase, 2)
+        psf = complex_multiply_astar_b(ft, ft)[..., 0]
+        
+        # Normalize PSF and transform to pytorch-complex
+        tmp = torch.unsqueeze(psf / torch.sum(psf, [1, 2])[:, None, None], -1)
 
-        # Normalize PSF
-        psf_norm = psf / torch.sum(psf, [-1, -2], keepdim=True)
+        # Set imaginary part to zero
+        psf = torch.cat([tmp, self.zeros.expand(tmp.size(0), self.npix_image, self.npix_image, 1)], -1)
 
-        # Compute OTF
-        otf = torch.fft.fft2(psf_norm)
+        # Compute Fourier transform of PSF for later convolutions
+        psf_ft = torch.fft(psf, 2)
 
-        return psf, otf, wavefront
+        return psf, psf_ft, wavefront
 
     def loss_and_wiener_filter(self, im_ft, psf_ft, variance):
         """Compute MOMFBD loss function and the estimated deconvolved image. See Michiel van Noorts and Mats Löfdahl papers
@@ -296,20 +293,20 @@ class Network(nn.Module):
         # S = psf_ft
                 
         # Compute S* x D
-        S_star_D = torch.conj(psf_ft) * im_ft
+        S_star_D = complex_multiply_astar_b(psf_ft, im_ft)
         
         # Compute D* x S
-        D_star_S = torch.conj(im_ft) * psf_ft
+        D_star_S = complex_multiply_astar_b(im_ft, psf_ft)
         
         # Compute modulus of S : |S|^2 = S* x S
-        modulus_S = torch.conj(psf_ft) * psf_ft
+        modulus_S = complex_multiply_astar_b(psf_ft, psf_ft)
         
         # Compute modulus of D : |D|^2 = D* x D
-        modulus_D = torch.conj(im_ft) * im_ft
+        modulus_D = complex_multiply_astar_b(im_ft, im_ft)
         
         # Compute modulus of the product between D^* and S summed for all frames
         sum_D_star_S = torch.sum(D_star_S, dim=1)
-        modulus_D_star_S = torch.conj(sum_D_star_S) * sum_D_star_S
+        modulus_D_star_S = complex_multiply_astar_b(sum_D_star_S, sum_D_star_S)
 
         # Wiener filter estimation of the image
         denominator = torch.sum(modulus_S, dim=1)
@@ -319,65 +316,30 @@ class Network(nn.Module):
         # Loss function
         tmp = torch.sum(modulus_D, dim=1)
 
-        loss = tmp - modulus_D_star_S / (variance[:, None, None] + denominator)
+        loss = tmp[..., 0] - modulus_D_star_S[..., 0] / (variance[:, None, None, None] + denominator[..., 0])
 
         # This normalization is here because we use non-normalized FFTs, which
         # lack a sqrt(Nx*Ny). It is squared because the loss function has
         # squared FFTs
-        loss_mn = torch.mean(loss.real) / (self.npix_image**2)
+        loss_mn = torch.mean(loss) / (self.npix_image**2)
 
         return numerator, denominator, loss_mn
 
     def forward(self, images, images_ft, variance):
         
-        # Evaluate the neural network to estimate the wavefront coefficients from the images
         coeff = self.modalnet(images)
 
-        # Rearrange the coefficients from (B*Nf, N_modes) to (B, Nf, N_modes)
-        tmp = rearrange(coeff, '(b f) m -> b f m', f=self.n_frames, m=self.n_modes)
+        tmp = coeff.view(-1, self.n_frames, self.n_modes)
 
-        # Force zero tip-tilt on average for all observed frames. This is done because
-        # the tip-tilt is degenerate with the image motion and cannot be estimated from the images. 
-        # The average tip-tilt is set to zero so that the estimated wavefronts are centered on the image.
-        avg = torch.mean(tmp, dim=1)
-        avg[:, 2:] = 0.0
+        # Force zero tip-tilt on average
+        avg = torch.mean(tmp, dim=1, keepdim=True)
+        avg[:, :, 2:] = 0.0
 
-        # Repeat the average tip-tilt for all frames and subtract it from the estimated coefficients
-        avg = repeat(avg, 'b m -> b f m', f=self.n_frames)
-        avg = rearrange(avg, 'b f m -> (b f) m')
+        avg = avg.expand(tmp.size(0), tmp.size(1), tmp.size(2)).reshape(-1, self.n_modes)
 
-        # Compute the PSFs and their Fourier transform from the estimated coefficients
         psf, psf_ft, wavefront = self.compute_psfs(coeff - avg)
 
-        # Rearrange the PSF Fourier transform from (B*Nf, Nx, Ny) to (B, Nf, Nx, Ny)
-        psf_ft = rearrange(psf_ft, '(b f) x y -> b f x y', f=self.n_frames)
-
-        # Compute the loss function and the Wiener filter estimation of the image
+        psf_ft = psf_ft.view(-1, self.n_frames, self.npix_image, self.npix_image, 2)
         numerator, denominator, loss = self.loss_and_wiener_filter(images_ft, psf_ft, variance)
         
         return coeff - avg, numerator, denominator, psf, psf_ft, loss
-    
-
-if __name__ == "__main__":
-    device = 'mps'
-    n_modes = 44
-    n_frames = 5
-    pixel_size = 0.042
-    telescope_diameter = 150.0
-    central_obscuration = 0.0
-    wavelength = 8000.0
-    basis_for_wavefront = 'kl'
-    npix_image = 128
-
-    model = Network(device=device, n_modes=n_modes, n_frames=n_frames, pixel_size=pixel_size,
-                    telescope_diameter=telescope_diameter, central_obscuration=central_obscuration,
-                    wavelength=wavelength, basis_for_wavefront=basis_for_wavefront, npix_image=npix_image)
-    
-    model = model.to(device)
-    
-
-    images = torch.rand((2, n_frames, npix_image, npix_image), dtype=torch.float32).to(device)
-    images_ft = torch.fft.fft2(images)
-    variance = torch.ones((2,), dtype=torch.float32).to(device)
-
-    coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
