@@ -570,13 +570,17 @@ def run_debug_test():
         # Backward pass
         loss.backward()
 
+        if step == 1:
+            print(f"CNN A01 weight grad max:  {model.cnn.A01.conv.weight.grad.abs().max().item():.4e}")
+            print(f"LSTM C43 weight grad max: {model.lstm.C43.weight.grad.abs().max().item():.4e}")
+
         # Gradient clipping to prevent sudden spikes during initial steps
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
 
         if step % 10 == 0 or step == 1:
-            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6f} | Grad Norm: {grad_norm.item():.4f}")
+            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6e} | Grad Norm: {grad_norm.item():.4e}")
 
     print("\n✅ Verification complete! Gradients and backward pass are functioning properly.")
 
