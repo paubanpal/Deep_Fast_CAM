@@ -1,0 +1,56 @@
+# Guidelines for file: https://aasensio.github.io/torchmfbd/userguide/deconvolution.html
+
+# Definition of parameters (for CS telescope)
+# (https://www.iac.es/es/observatorios-de-canarias/telescopios-y-experimentos/telescopio-carlos-sanchez)
+telescope:
+    # CS: prim. diameter: 152.4cm,    sec. diameter: 37.1cm
+    diameter: 152.4     # in cm
+    central_obscuration : 37.1   # in cm
+
+images:
+    # CS: pix_size: 0.035arcsec
+    n_pixel : 256
+    pix_size : 0.035    # arcsec
+    apodization_border : 6
+
+object1:
+    wavelength : 8250.0 # amstrong
+    image_filter: tophat
+    cutoff : [0.75, 0.80]   # try diff values
+    s_u_joint: 250.0    # ¿?
+
+object2:
+    wavelength : 8250.0 # amstrong
+    image_filter: tophat
+    cutoff : [0.75, 0.80]
+    s_u_joint: 250.0
+
+optimization:
+    gpu : 0
+    transform : softplus
+    softplus_scale : 1.0
+    lr_obj : 0.02
+    lr_modes : 0.08
+    show_object_info : False
+    loss_type : joint
+
+regularization:
+    iuwt1:
+        variable : object
+        lambda : 0.0
+        nbands : 5
+
+psf:
+    model : kl
+    nmax_modes : 119
+    n_pixel: 256
+    #n_pixel: 512   # 128 por defecto
+
+initialization:
+    object : contrast
+    modes_std : 0.0
+
+annealing:
+    type: sigmoid
+    start_pct : 0.0
+    end_pct : 0.85

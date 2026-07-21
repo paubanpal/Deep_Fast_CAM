@@ -1,0 +1,723 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.utils.data
+import torch.nn.init as init
+import util
+import zern
+import kl_modes
+from einops import rearrange, repeat
+import torch.nn.functional as F
+
+def kaiming_init(m):
+    if isinstance(m, (nn.Linear, nn.Conv2d)):
+        init.kaiming_normal_(m.weight)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
+    elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        m.weight.data.fill_(1)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
+
+class ConvBlock(nn.Module):
+    def __init__(self, inplanes, outplanes, kernel_size=3, stride=1, bn=True, activation=True):
+        """Convolutional block : BN+RELU+CONV
+        The CONV uses reflection padding
+        BN and RELU can be on/off depending on the keywords "bn" and "activation"
+        
+        Args:
+            inplanes (int): number of input channels
+            outplanes (int): number of output channels
+            kernel_size (int, optional): Kernel size. Defaults to 3.
+            stride (int, optional): Stride. Defaults to 1.
+            bn (bool, optional): Use batch normalization. Defaults to True.
+            activation (bool, optional): Use activation. Defaults to True.
+        """
+        super(ConvBlock, self).__init__()
+
+        self.use_bn = bn
+        self.use_activation = activation
+
+        self.conv = nn.Conv2d(inplanes, outplanes, kernel_size=kernel_size, stride=stride)
+        self.reflection = nn.ReflectionPad2d(int((kernel_size-1)/2))
+
+        if (bn):
+            self.bn = nn.BatchNorm2d(inplanes)
+
+        self.elu = nn.ELU(inplace=False)
+
+    def forward(self, x):
+        if (self.use_bn):
+            out = self.bn(x)
+            out = self.elu(out)
+            out = self.reflection(out)
+            out = self.conv(out)
+
+        else:
+            out = self.reflection(x)
+            out = self.conv(out)
+            if (self.use_activation):
+                out = self.elu(out)
+
+        return out
+    
+class CNN(nn.Module):
+    def __init__(self, n, n_lstm):
+        """Neural network to estimate latent features from a set of images
+        An encoder is applied in parallel to all pairs of images so that a vector
+        of 128 features is obtained from each pair of images. 
+        
+        Args:
+            n (int, optional): Number of channels in the hidden convolutional layers. Defaults to 32.
+            n_lstm: number of input channels for the afterwards lstm network
+        """
+        super().__init__()
+
+        self.n_lstm = n_lstm
+
+        # self.n_modes = n_modes
+        # self.npix_image = npix_image
+        # self.n_frames = n_frames
+        # self.device = device
+
+        self.A01 = ConvBlock(1, n, kernel_size=9, bn=False, activation=False)
+
+        self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
+        self.C02 = ConvBlock(n, n, kernel_size=7)
+        self.C03 = ConvBlock(n, n, kernel_size=7)
+        self.C04 = ConvBlock(n, n, kernel_size=7)
+
+        self.C11 = ConvBlock(n, n, kernel_size=5, stride=2)
+        self.C12 = ConvBlock(n, n, kernel_size=5)
+        self.C13 = ConvBlock(n, n, kernel_size=5)
+        self.C14 = ConvBlock(n, n, kernel_size=5)
+
+        self.C21 = ConvBlock(n, n, kernel_size=3, stride=2)
+        self.C22 = ConvBlock(n, n, kernel_size=3)
+        self.C23 = ConvBlock(n, n, kernel_size=3)
+        self.C24 = ConvBlock(n, n, kernel_size=3)
+
+        # kernel_size = 16
+        # self.C41 = nn.Conv2d(n, self.n_lstm, kernel_size=kernel_size, stride=1)
+
+        # CHANGE 1: Global adaptive pooling collapses spatial dimensions to 1x1 
+        # regardless of whether the image is 128x128, 256x256, etc.
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.C41 = nn.Conv2d(n, self.n_lstm, kernel_size=1, stride=1)
+
+    def weights_init(self):
+        for module in self.modules():
+            kaiming_init(module)
+
+    def forward(self, images):
+        
+        # # We reform the tensor from (B,Nf,1,nx,ny) to (B*Nf,1,nx,ny) so that the features
+        # # are extracted for all frames of all batches in parallel
+        # # B is the batch size
+        # # Nf is the number of frames
+        # tmp = images.view(-1, 1, self.npix_image, self.npix_image)
+
+        # CHANGE 2: Extract spatial dimensions dynamically
+        if images.dim() == 4:
+            images = images.unsqueeze(2)
+
+        B, Nf, C, H, W = images.shape
+        tmp = images.view(B * Nf, C, H, W)
+
+        # (B*Nf,2,129,128) -> (B*Nf,32,128,128)
+        A01 = self.A01(tmp)
+
+        # (B*Nf,32,128,128) -> (B*Nf,32,64,64)
+        C01 = self.C01(A01)
+        C02 = self.C02(C01)
+        C03 = self.C03(C02)
+        C04 = C01 + self.C04(C03)
+
+        # (B*Nf,32,64,64) -> (B*Nf,32,32,32)
+        C11 = self.C11(C04)
+        C12 = self.C12(C11)
+        C13 = self.C13(C12)
+        C14 = C11 + self.C14(C13)
+
+        # (B*Nf,32,32,32) -> (B*Nf,32,16,16)
+        C21 = self.C21(C14)
+        C22 = self.C22(C21)
+        C23 = self.C23(C22)
+        C24 = C21 + self.C24(C23)
+
+        # # (B*Nf,32,16,16) -> (B*Nf,128,1,1)
+        # out = self.C41(C24)
+
+        # # (B*Nf,128,1) -> (B*Nf,128)
+        # out = out.squeeze()
+
+        # # (B*Nf,128) -> (B,Nf,128)
+        # out = out.view(-1, self.n_frames, self.n_lstm)
+
+        out = self.global_pool(C24)
+        out = self.C41(out)
+
+        out = torch.flatten(out, start_dim=1)
+        out = out.view(B, Nf, self.n_lstm)
+
+        return out
+    
+class LSTM(nn.Module):
+    def __init__(self, n_modes, n_lstm):
+        """Neural network to estimate the wavefront coefficients from a set of latent features.
+        This one uses a recurrent architecture and works for M pairs of focused+defocused
+        images. These vectors (latent features) are then fed
+        into an bi-directional LSTM that provides as output another vector of size 128
+        per timestep. A final linear layer projects these vectors into the modal coefficients.
+        
+        Args:
+            latent_features: input vector with latent features
+            n (int, optional): Number of channels in the hidden convolutional layers. Defaults to 32.
+            n_modes (int, optional): Number of output modes. Defaults to 40.
+            n_lstm: number of input channels for the lstm network
+        """
+        super().__init__()
+
+        self.n_modes = n_modes
+        self.n_lstm = n_lstm
+        
+        self.C42 = nn.Linear(2*self.n_lstm, self.n_lstm)
+        self.C43 = nn.Linear(self.n_lstm, n_modes)
+        
+        self.elu = nn.ELU()
+
+        self.lstm = nn.LSTM(self.n_lstm, self.n_lstm, batch_first=True, bidirectional=True, dropout=0.0)
+
+    def weights_init(self):
+        for module in self.modules():
+            kaiming_init(module)
+
+    def forward(self, latent_features, lengths=None):
+        """
+        Args:
+            latent_features (tensor): Extracted spatial features [B, Nf, n_lstm]
+            lengths (tensor, optional): Actual valid frame count per batch item [B] (e.g., tensor([494, 500]))
+        """
+        if lengths is not None:
+            # Pack sequence so LSTM ignores padded zero-frames
+            packed = nn.utils.rnn.pack_padded_sequence(
+                latent_features, lengths.to(torch.int64).cpu(), batch_first=True, enforce_sorted=False
+            )
+            packed_out, _ = self.lstm(packed)
+            out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
+        else:
+            out, _ = self.lstm(latent_features)
+
+        # Reshape for linear MLP projection: [B * Nf, 2 * n_lstm]
+        out = out.reshape(-1, 2 * self.n_lstm)
+        out = self.elu(self.C42(out))
+        out = self.C43(out)
+        return out
+    
+import torch
+import torch.nn as nn
+
+class CNN(nn.Module):
+    def __init__(self, n=32, n_lstm=128):
+        """
+        Extractor espacial de características para secuencias de imágenes.
+        
+        Args:
+            n (int): Número de canales en las capas convolucionales ocultas.
+            n_lstm (int): Dimensión del espacio latente de salida (por defecto 128).
+        """
+        super().__init__()
+
+        self.n_lstm = n_lstm
+
+        self.A01 = ConvBlock(1, n, kernel_size=9, bn=False, activation=False)
+
+        self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
+        self.C02 = ConvBlock(n, n, kernel_size=7)
+        self.C03 = ConvBlock(n, n, kernel_size=7)
+        self.C04 = ConvBlock(n, n, kernel_size=7)
+
+        self.C11 = ConvBlock(n, n, kernel_size=5, stride=2)
+        self.C12 = ConvBlock(n, n, kernel_size=5)
+        self.C13 = ConvBlock(n, n, kernel_size=5)
+        self.C14 = ConvBlock(n, n, kernel_size=5)
+
+        self.C21 = ConvBlock(n, n, kernel_size=3, stride=2)
+        self.C22 = ConvBlock(n, n, kernel_size=3)
+        self.C23 = ConvBlock(n, n, kernel_size=3)
+        self.C24 = ConvBlock(n, n, kernel_size=3)
+
+        kernel_size = 16
+        self.C41 = nn.Conv2d(n, self.n_lstm, kernel_size=kernel_size, stride=1)
+
+    def weights_init(self):
+        for module in self.modules():
+            kaiming_init(module)
+
+    def forward(self, images):
+        # Aceptamos 'images' de forma [B, Nf, 1, H, W] o [B, Nf, H, W]
+        if images.dim() == 4:
+            # Si viene sin la dimensión de canal -> [B, Nf, H, W] -> añadimos C=1
+            images = images.unsqueeze(2)
+            
+        # 1. Leemos las dimensiones REALES del tensor dinámicamente
+        B, Nf, C, H, W = images.shape
+
+        # 2. Reestructuramos a (B * Nf, C, H, W) para procesar todas las imágenes en paralelo
+        tmp = images.view(B * Nf, C, H, W)
+
+        # Extracción de características espacial
+        A01 = self.A01(tmp)
+
+        # Bloque 1
+        C01 = self.C01(A01)
+        C02 = self.C02(C01)
+        C03 = self.C03(C02)
+        C04 = C01 + self.C04(C03)
+
+        # Bloque 2
+        C11 = self.C11(C04)
+        C12 = self.C12(C11)
+        C13 = self.C13(C12)
+        C14 = C11 + self.C14(C13)
+
+        # Bloque 3
+        C21 = self.C21(C14)
+        C22 = self.C22(C21)
+        C23 = self.C23(C22)
+        C24 = C21 + self.C24(C23)
+
+        # Proyección final: (B * Nf, n, 16, 16) -> (B * Nf, 128, 1, 1)
+        out = self.C41(C24)
+
+        # 3. En lugar de squeeze(), aplanamos espacialmente de forma segura -> (B * Nf, 128)
+        out = torch.flatten(out, start_dim=1)
+
+        # 4. Reorganizamos la secuencia respetando el B y Nf dinámicos -> (B, Nf, 128)
+        out = out.view(B, Nf, self.n_lstm)
+
+        return out
+    
+class LSTM(nn.Module):
+    def __init__(self, n_modes, n_lstm):
+        """Neural network to estimate the wavefront coefficients from a set of latent features.
+        This one uses a recurrent architecture and works for M pairs of focused+defocused
+        images. These vectors (latent features) are then fed
+        into an bi-directional LSTM that provides as output another vector of size 128
+        per timestep. A final linear layer projects these vectors into the modal coefficients.
+        
+        Args:
+            latent_features: input vector with latent features
+            n (int, optional): Number of channels in the hidden convolutional layers. Defaults to 32.
+            n_modes (int, optional): Number of output modes. Defaults to 40.
+            n_lstm: number of input channels for the lstm network
+        """
+        super().__init__()
+
+        self.n_modes = n_modes
+        self.n_lstm = n_lstm
+        
+        self.C42 = nn.Linear(2*self.n_lstm, self.n_lstm)
+        self.C43 = nn.Linear(self.n_lstm, n_modes)
+        
+        self.elu = nn.ELU()
+
+        self.lstm = nn.LSTM(self.n_lstm, self.n_lstm, batch_first=True, bidirectional=True, dropout=0.0)
+
+    def weights_init(self):
+        for module in self.modules():
+            kaiming_init(module)
+
+    def forward(self, latent_features):
+        
+
+        # (B,Nf,128) -> (B,Nf,128)
+        out, _ = self.lstm(latent_features)
+
+        # (B,Nf,128) -> (B*Nf,128)
+        out = out.reshape(-1, 2*self.n_lstm)
+
+        # (B*Nf,128) -> (B*Nf,44)
+        out = self.elu(self.C42(out))
+        out = self.C43(out)
+
+        # (B*Nf,N_modes) -> (B,Nf*N_modes)
+        # out = out.view(-1, self.n_frames * self.n_modes)
+
+        return out
+    
+class SmallTemporalTransformer(nn.Module):
+    def __init__(self, spatial_dim=128, latent_dim=None, nhead=4, num_layers=2, num_coefficients=3, max_seq_len=1000):
+        super().__init__()
+
+        if latent_dim is None:
+            latent_dim = spatial_dim
+
+        if latent_dim % nhead != 0:
+            raise ValueError(f"latent_dim ({latent_dim}) must be divisible by nhead ({nhead}).")
+        
+        self.input_projection = nn.Linear(spatial_dim, latent_dim)
+        
+        # Ampliamos max_seq_len (por ejemplo, a 1000) para no limitar el modelo si llega un stack grande
+        self.positional_embedding = nn.Parameter(torch.randn(1, max_seq_len, latent_dim))
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim, 
+            nhead=nhead, 
+            dim_feedforward=latent_dim * 2, 
+            dropout=0.1,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        self.coefficient_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim // 2),
+            nn.GELU(),
+            nn.Linear(latent_dim // 2, num_coefficients)
+        )
+        
+    def forward(self, x, key_padding_mask=None):
+        """
+        x: Tensor [Batch_Size, Seq_Len, Spatial_Dim]
+        key_padding_mask: Tensor Booleano [Batch_Size, Seq_Len] 
+                          (True para las posiciones de padding que DEBEN ignorarse)
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Proyección e inyección posicional ajustada a la longitud real seq_len del lote actual
+        x = self.input_projection(x)
+        x = x + self.positional_embedding[:, :seq_len, :]
+        
+        # El Transformer ignora las posiciones marcadas como True en key_padding_mask
+        x = self.transformer(x, src_key_padding_mask=key_padding_mask)
+        
+        # Mapeo a coeficientes
+        coefficients = self.coefficient_head(x)
+        return coefficients
+    
+class AstronomicalDistortionEstimator(nn.Module):
+    def __init__(self, cnn_channels=32, spatial_dim=128, nhead=4, num_layers=2, num_coefficients=3, freeze_cnn=False):
+        """
+        Red unificada para la estimación de coeficientes de distorsión.
+        
+        Args:
+            cnn_channels (int): Canales de las capas ocultas de la CNN.
+            spatial_dim (int): Dimensión del vector latente espacial (default: 128).
+            nhead (int): Cabezas de atención para el Transformer.
+            num_layers (int): Capas del Transformer Encoder.
+            num_coefficients (int): N coeficientes a predecir por frame.
+            freeze_cnn (bool): Si es True, congela la CNN para evitar overfitting.
+        """
+        super().__init__()
+        
+        self.spatial_extractor = CNN(n=cnn_channels, n_lstm=spatial_dim)
+        
+        self.temporal_transformer = SmallTemporalTransformer(
+            spatial_dim=spatial_dim,
+            latent_dim=spatial_dim,
+            nhead=nhead,
+            num_layers=num_layers,
+            num_coefficients=num_coefficients
+        )
+        
+        # Opcion A: Si entrenas la CNN desde cero, inicializas sus pesos
+        if not freeze_cnn:
+            self.init_cnn_weights()
+            
+        # Opción B: Si la congelas para evitar overfitting con tus 15 bloques
+        else:
+            for param in self.spatial_extractor.parameters():
+                param.requires_grad = False
+
+    def init_cnn_weights(self):
+        """Inicializa explícitamente solo el extractor espacial (CNN)"""
+        for m in self.spatial_extractor.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                # Inicialización Kaiming/He adecuada para capas con activación LeakyReLU/GELU/ReLU
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, images, padding_mask=None):
+        """
+        Args:
+            images: Tensor de imágenes [Batch, Nf, 128, 128] o [Batch, Nf, 1, 128, 128]
+            padding_mask: Tensor booleano [Batch, Nf] donde True indica padding a ignorar.
+            
+        Returns:
+            coefficients: Tensor de coeficientes [Batch, Nf, num_coefficients]
+        """
+        # 1. Extracción de características espaciales frame por frame
+        # Entran imágenes [B, Nf, 128, 128] -> Salen vectores latentes [B, Nf, 128]
+        spatial_features = self.spatial_extractor(images)
+        
+        # 2. Análisis del contexto temporal
+        # Entran vectores latentes [B, Nf, 128] -> Salen coeficientes [B, Nf, N]
+        coefficients = self.temporal_transformer(spatial_features, key_padding_mask=padding_mask)
+        
+        return coefficients
+
+class Network(nn.Module):
+    def __init__(self, device='cpu', n_modes=44, n_frames=5, pixel_size=0.042, \
+        telescope_diameter=150.0, central_obscuration=0.0, wavelength=8000.0, basis_for_wavefront='zernike', npix_image=128):
+        
+        super().__init__()
+
+        self.n_modes = n_modes
+        self.n_frames = n_frames
+        self.pixel_size = pixel_size
+        self.telescope_diameter = telescope_diameter
+        self.central_obscuration = central_obscuration
+        self.wavelength = wavelength
+        self.npix_image = npix_image
+        self.basis_for_wavefront = basis_for_wavefront
+        self.device = device
+
+        print(f"Wavelength : {self.wavelength} A")
+        print(f"Diameter : {self.telescope_diameter} cm")
+        print(f"Central obscuration : {self.central_obscuration} cm")
+        print(f"Pixel size : {self.pixel_size} arcsec")
+
+        # Compute PSF scale, which depends on the wavelength, telescope diameter and pixel size. This is used to compute the overfill of the pupil
+        # so that the final PSF has the correct pixel size
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
+        if (self.overfill < 1.0):
+            raise Exception(f"The pixel size is not small enough to model a telescope with D={self.telescope_diameter} cm")
+            
+        # Compute telescope aperture
+        pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
+        pupil = torch.tensor(pupil.astype('float32'))
+            
+        # Define the basis for the wavefront. This can be either Zernike or KL modes
+        if (self.basis_for_wavefront == 'zernike'):
+            print("Computing Zernike modes...")
+            Z_machine = zern.ZernikeNaive(mask=[])
+            x = np.linspace(-1, 1, self.npix_image)
+            xx, yy = np.meshgrid(x, x)
+            rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
+            theta = np.arctan2(yy, xx)
+            aperture_mask = rho <= 1.0
+
+            basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
+            
+            # Precompute all Zernike modes except for piston
+            for j in range(self.n_modes):
+                n, m = zern.zernIndex(j+2)
+                Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
+                basis[j,:,:] = Z * aperture_mask
+
+        if (self.basis_for_wavefront == 'kl'):
+            print("Computing KL modes...")
+            kl = kl_modes.KL()
+            basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
+
+        zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
+
+        # Register buffers so that they are moved to the GPU when the model is moved to the GPU
+        self.register_buffer('zeros', zeros)
+        self.register_buffer('pupil', pupil)
+        self.register_buffer('basis', torch.tensor(basis.astype('float32')))
+
+        # Define the neural network that will estimate the wavefront coefficients from a set of images
+
+        # self.modalnet = Recurrentnet(in_planes=1, 
+        #                              device=self.device, 
+        #                              n_modes=self.n_modes, 
+        #                              n_frames=self.n_frames, 
+        #                              npix_image=self.npix_image, 
+        #                              n=16, 
+        #                              n_lstm=256).to(self.device)
+        # self.modalnet.weights_init()
+
+        self.cnn = CNN(n=16, n_lstm=256)
+        self.cnn.weights_init()
+
+        self.lstm = LSTM(n_modes=self.n_modes, n_lstm=256)
+        self.lstm.weights_init()
+
+    def compute_psfs(self, coeff, target_shape=None):
+        """Compute the PSFs and their Fourier transform from a set of modes
+        
+        Args:
+            wavefront_focused ([type]): wavefront of the focused image
+            illum ([type]): pupil aperture
+            diversity ([type]): diversity for this specific images
+        
+        """
+
+        # CHANGE: Interpolate pupil mask and modal basis if incoming images vary from npix_image
+        pupil = self.pupil
+        basis = self.basis
+        
+        if target_shape is not None and (target_shape[0] != self.npix_image or target_shape[1] != self.npix_image):
+            H, W = target_shape
+            # FIX 2: Explicit indexing [0, 0] / [0] prevents Squeeze dimension bugs
+            pupil = F.interpolate(pupil[None, None, :, :], size=(H, W), mode='nearest')[0, 0]
+            basis = F.interpolate(basis[None, :, :, :], size=(H, W), mode='bilinear', align_corners=False)[0]
+
+        # Compute real and imaginary parts of the pupil
+        wavefront = torch.einsum('ij,jkl->ikl', coeff, basis)
+
+        # Compute the generalized pupil function
+        phase = pupil[None, :, :] * torch.exp(1j * wavefront)
+
+        # Compute FFT of the pupil function and compute autocorrelation
+        ft = torch.fft.fft2(phase)
+        psf = (torch.conj(ft) * ft).real
+
+        # Normalize PSF
+        psf_norm = psf / torch.sum(psf, [-1, -2], keepdim=True)
+
+        # Compute OTF
+        otf = torch.fft.fft2(psf_norm)
+
+        return psf, otf, wavefront
+
+    def loss_and_wiener_filter(self, im_ft, psf_ft, variance, lengths=None):
+        """Compute MOMFBD loss function and the estimated deconvolved image. See Michiel van Noorts and Mats Löfdahl papers
+        
+        Args:
+            focused_ft (tensor): FFT of the focused images
+            defocused_ft (tensor): FFT of the defocused images
+            psf_focused_ft (tensor): FFT of the focused PSF
+            psf_defocused_ft (tensor): FFT of the defocused PSF
+        
+        
+        """
+        # zero out the PSFs/OTFs of padded frames before computing the loss:
+        if lengths is not None:
+            Nf = psf_ft.shape[1]
+            lengths_dev = lengths.to(psf_ft.device)
+            # mask shape: [B, Nf, 1, 1]
+            mask = (torch.arange(Nf, device=psf_ft.device)[None, :] < lengths_dev[:, None])[:, :, None, None]
+            psf_ft = psf_ft * mask  # Zero out OTF for padded frames
+            im_ft = im_ft * mask
+
+    
+        # D = burst_ft
+        # S = psf_ft
+                
+        # Compute S* x D
+        S_star_D = torch.conj(psf_ft) * im_ft
+        
+        # Compute D* x S
+        D_star_S = torch.conj(im_ft) * psf_ft
+        
+        # Compute modulus of S : |S|^2 = S* x S
+        modulus_S = torch.conj(psf_ft) * psf_ft
+        
+        # Compute modulus of D : |D|^2 = D* x D
+        modulus_D = torch.conj(im_ft) * im_ft
+        
+        # Compute modulus of the product between D^* and S summed for all frames
+        sum_D_star_S = torch.sum(D_star_S, dim=1)
+        modulus_D_star_S = torch.conj(sum_D_star_S) * sum_D_star_S
+
+        # Wiener filter estimation of the image
+        denominator = torch.sum(modulus_S, dim=1)
+        # Q[..., 0] += 1e-10
+        numerator = torch.sum(S_star_D, dim=1)
+
+        # Loss function
+        tmp = torch.sum(modulus_D, dim=1)
+
+        loss = tmp - modulus_D_star_S / (variance[:, None, None] + denominator + 1e-10)
+
+        # # This normalization is here because we use non-normalized FFTs, which
+        # # lack a sqrt(Nx*Ny). It is squared because the loss function has
+        # # squared FFTs
+        # loss_mn = torch.mean(loss.real) / (self.npix_image**2)
+
+        # CHANGE: Use dynamic spatial pixel count for unnormalized FFT loss scaling
+        spatial_pixels = im_ft.shape[-2] * im_ft.shape[-1]
+
+        if lengths is not None:
+            # Sum only valid non-padded frame losses and divide by total valid frame count across batch
+            total_valid_frames = torch.sum(lengths_dev)
+            loss_mn = (torch.sum(loss.real) / total_valid_frames) / spatial_pixels
+        else:
+            loss_mn = torch.mean(loss.real) / spatial_pixels
+
+        return numerator, denominator, loss_mn
+
+    def forward(self, images, images_ft, variance, lengths=None):
+        """
+        Args:
+            images (tensor): Input image stack [B, Nf, H, W] or [B, Nf, 1, H, W]
+            images_ft (tensor): Fourier transform of images
+            variance (tensor): Noise variance per batch item
+            lengths (tensor, optional): Tensor containing valid sequence lengths per batch item [B]
+        """
+        
+        # CHANGE 1: Dynamically retrieve sequence and spatial shape parameters
+        B, Nf = images.shape[0], images.shape[1]
+        H, W = images.shape[-2], images.shape[-1]
+
+        # 1. Extraction of latent features per image [B, Nf, 256]
+        latent_features = self.cnn(images)
+
+        # 2. Sequence processing with variable stack support: [B * Nf, n_modes]
+        coeff = self.lstm(latent_features, lengths=lengths)
+
+        # Rearrange the coefficients from (B*Nf, N_modes) to (B, Nf, N_modes)
+        tmp = rearrange(coeff, '(b f) m -> b f m', f=Nf, m=self.n_modes)
+
+        # Calculate average tip-tilt (modes 0 & 1), masking out padded frames if lengths are supplied
+        if lengths is not None:
+            lengths_dev = lengths.to(images.device)
+            
+            # Create boolean mask: [B, Nf] (True for real frames, False for padded frames)
+            mask = torch.arange(Nf, device=images.device)[None, :] < lengths_dev[:, None]
+            mask_expanded = mask.unsqueeze(-1)
+
+            # Sum valid frames only and divide by actual valid lengths
+            sum_coeff = torch.sum(tmp * mask_expanded, dim=1)
+            avg = sum_coeff / lengths_dev[:, None]
+        else:
+            avg = torch.mean(tmp, dim=1)
+
+        # Force zero tip-tilt on average for all observed frames. This is done because
+        # the tip-tilt is degenerate with the image motion and cannot be estimated from the images. 
+        # The average tip-tilt is set to zero so that the estimated wavefronts are centered on the image.
+        avg[:, 2:] = 0.0
+        avg = repeat(avg, 'b m -> b f m', f=Nf)
+        avg = rearrange(avg, 'b f m -> (b f) m')
+
+        # Compute PSFs dynamically for current frame grid
+        coeff_corrected = coeff - avg
+        psf, psf_ft, wavefront = self.compute_psfs(coeff_corrected, target_shape=(H, W))
+        psf_ft = rearrange(psf_ft, '(b f) x y -> b f x y', f=Nf)
+
+        # Compute physics-based loss and Wiener filter terms
+        numerator, denominator, loss = self.loss_and_wiener_filter(images_ft, psf_ft, variance, lengths=lengths)
+        
+        return coeff_corrected, numerator, denominator, psf, psf_ft, loss
+    
+
+if __name__ == "__main__":
+    device = 'mps'
+    n_modes = 44
+    n_frames = 5
+    pixel_size = 0.042
+    telescope_diameter = 150.0
+    central_obscuration = 0.0
+    wavelength = 8000.0
+    basis_for_wavefront = 'kl'
+    npix_image = 128
+
+    model = Network(device=device, n_modes=n_modes, n_frames=n_frames, pixel_size=pixel_size,
+                    telescope_diameter=telescope_diameter, central_obscuration=central_obscuration,
+                    wavelength=wavelength, basis_for_wavefront=basis_for_wavefront, npix_image=npix_image)
+    
+    model = model.to(device)
+    
+
+    images = torch.rand((2, n_frames, npix_image, npix_image), dtype=torch.float32).to(device)
+    images_ft = torch.fft.fft2(images, dim=(-2, -1))
+    variance = torch.ones((2,), dtype=torch.float32).to(device)
+
+    coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)

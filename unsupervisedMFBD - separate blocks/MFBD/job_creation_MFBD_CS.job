@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name=tiff_img_deconv_CS
+#SBATCH --output=experiments/logs/%x_%j.out
+#SBATCH --error=experiments/logs/%x_%j.err
+#SBATCH --partition=batch
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=24G
+#SBATCH --time=16:00:00
+
+#SBATCH --mail-type=BEGIN,END
+#SBATCH --mail-user=paula.banares@iac.es
+
+
+#export PATH="/home/paulabp/miniconda3/envs/tfm_conda_venv/bin:$PATH"
+
+source /scratch/paulabp/miniconda3/bin/activate tfm_conda_venv
+cd /scratch/paulabp/TFM/repository/Deep_Fast_CAM/MFBD
+
+srun python tiff_img_deconv_CS_v3.py 

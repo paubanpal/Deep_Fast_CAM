@@ -1,0 +1,22 @@
+Working directory TFM:
+I:\Departamentos\Óptica\paulabp\master\TFM\codigo>
+
+Virtual environment stored in:
+
+
+Para cambiar al directorio en el me encontraba anteriormente (no entiende la tilde de Óptica):
+cd -
+
+To activate the virtual environment stored somewhere else from my working directory:
+export PATH="/home/paulabp/miniconda3/envs/tfm_conda_venv/bin:$PATH"
+
+source /home/paulabp/miniconda3/etc/profile.d/conda.sh
+conda activate tfm_conda_venv
+
+/home/paulabp/miniconda3/envs/tfm_conda_venv/bin/python main.py
+
+To save a new requirements file from the HPC:
+conda env export --no-builds > environment.yml
+
+To select GPU in sbatch in burros:
+#SBATCH --gres=gpu:1
