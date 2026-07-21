@@ -189,8 +189,14 @@ class LSTM(nn.Module):
         self.lstm = nn.LSTM(self.n_lstm, self.n_lstm, batch_first=True, bidirectional=True, dropout=0.0)
 
     def weights_init(self):
+        # Apply standard Kaiming initialization to all layers
         for module in self.modules():
             kaiming_init(module)
+
+        # Override the final linear layer (C43) with near-zero initialization
+        nn.init.normal_(self.C43.weight, std=1e-3)
+        if self.C43.bias is not None:
+            nn.init.zeros_(self.C43.bias)
 
     def forward(self, latent_features, lengths=None):
         """
@@ -309,14 +315,14 @@ class Network(nn.Module):
         phase = pupil[None, :, :] * torch.exp(1j * wavefront)
 
         # Compute FFT of the pupil function and compute autocorrelation
-        ft = torch.fft.fft2(phase)
+        ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
 
         # Normalize PSF
         psf_norm = psf / torch.sum(psf, [-1, -2], keepdim=True)
 
         # Compute OTF
-        otf = torch.fft.fft2(psf_norm)
+        otf = torch.fft.fft2(psf_norm, norm="ortho")
 
         return psf, otf, wavefront
 
@@ -375,15 +381,21 @@ class Network(nn.Module):
         # # squared FFTs
         # loss_mn = torch.mean(loss.real) / (self.npix_image**2)
 
-        # CHANGE: Use dynamic spatial pixel count for unnormalized FFT loss scaling
-        spatial_pixels = im_ft.shape[-2] * im_ft.shape[-1]
+        # -------------------------------------------------------------
+        # With norm="ortho", spatial_pixels scaling is no longer required
+        # -------------------------------------------------------------
+
+        # # CHANGE: Use dynamic spatial pixel count for unnormalized FFT loss scaling
+        # spatial_pixels = im_ft.shape[-2] * im_ft.shape[-1]
 
         if lengths is not None:
             # Sum only valid non-padded frame losses and divide by total valid frame count across batch
             total_valid_frames = torch.sum(lengths_dev)
-            loss_mn = (torch.sum(loss.real) / total_valid_frames) / spatial_pixels
+            # loss_mn = (torch.sum(loss.real) / total_valid_frames) / spatial_pixels
+            loss_mn = (torch.sum(loss.real) / total_valid_frames)
         else:
-            loss_mn = torch.mean(loss.real) / spatial_pixels
+            # loss_mn = torch.mean(loss.real) / spatial_pixels
+            loss_mn = torch.mean(loss.real)
 
         return numerator, denominator, loss_mn
 
@@ -423,10 +435,21 @@ class Network(nn.Module):
         else:
             avg = torch.mean(tmp, dim=1)
 
-        # Force zero tip-tilt on average for all observed frames. This is done because
-        # the tip-tilt is degenerate with the image motion and cannot be estimated from the images. 
-        # The average tip-tilt is set to zero so that the estimated wavefronts are centered on the image.
-        avg[:, 2:] = 0.0
+        # -----------------------------------------------------------------
+        # OLD (IN-PLACE MUTATION CAUSING DETACHMENT):
+        # # Force zero tip-tilt on average for all observed frames. This is done because
+        # # the tip-tilt is degenerate with the image motion and cannot be estimated from the images. 
+        # # The average tip-tilt is set to zero so that the estimated wavefronts are centered on the image.
+        # avg[:, 2:] = 0.0
+        # avg = repeat(avg, 'b m -> b f m', f=Nf)
+        # avg = rearrange(avg, 'b f m -> (b f) m')
+        # -----------------------------------------------------------------
+
+        # NEW (SAFE MULTIPLICATION KEEPING AUTOGRAD INTENDED):
+        mask_tt = torch.zeros_like(avg)
+        mask_tt[:, :2] = 1.0  # Preserve Tip-Tilt (modes 0 and 1) only
+        avg = avg * mask_tt
+
         avg = repeat(avg, 'b m -> b f m', f=Nf)
         avg = rearrange(avg, 'b f m -> (b f) m')
 
@@ -441,26 +464,121 @@ class Network(nn.Module):
         return coeff_corrected, numerator, denominator, psf, psf_ft, loss
     
 
+# if __name__ == "__main__":
+#     device = 'mps'
+#     n_modes = 44
+#     n_frames = 5
+#     pixel_size = 0.042
+#     telescope_diameter = 150.0
+#     central_obscuration = 0.0
+#     wavelength = 8000.0
+#     basis_for_wavefront = 'kl'
+#     npix_image = 128
+
+#     model = Network(device=device, n_modes=n_modes, n_frames=n_frames, pixel_size=pixel_size,
+#                     telescope_diameter=telescope_diameter, central_obscuration=central_obscuration,
+#                     wavelength=wavelength, basis_for_wavefront=basis_for_wavefront, npix_image=npix_image)
+    
+#     model = model.to(device)
+    
+
+#     images = torch.rand((2, n_frames, npix_image, npix_image), dtype=torch.float32).to(device)
+#     images_ft = torch.fft.fft2(images, dim=(-2, -1))
+#     variance = torch.ones((2,), dtype=torch.float32).to(device)
+
+#     coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
+
+
+
+def run_debug_test():
+    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    print(f"--- Running Debug Test on [{device.upper()}] ---")
+
+    # 1. Instantiate network
+    model = Network(
+        device=device,
+        n_modes=44,
+        n_frames=10,  # Max frames per sequence
+        pixel_size=0.042,
+        telescope_diameter=150.0,
+        central_obscuration=0.0,
+        wavelength=8000.0,
+        basis_for_wavefront='kl',
+        npix_image=128
+    ).to(device)
+
+    # Enable anomaly detection to catch NaN/Inf gradients immediately
+    torch.autograd.set_detect_anomaly(True)
+
+    # 2. Create a synthetic mini-batch with variable lengths
+    batch_size = 2
+    max_frames = 10
+    H, W = 128, 128
+
+    # Sequence lengths: Item 0 has 7 real frames, Item 1 has 10 real frames
+    lengths = torch.tensor([7, 10], dtype=torch.int64).to(device)
+    
+    # Generate dummy image batch [B, Nf, H, W]
+    images = torch.rand((batch_size, max_frames, H, W), dtype=torch.float32, device=device)
+    
+    # Zero out padded frames in input tensor to reflect actual padded data
+    mask = (torch.arange(max_frames, device=device)[None, :] < lengths[:, None])[:, :, None, None]
+    images = images * mask
+
+    # Before passing to the model or computing FFTs:
+    # Method A: Normalizes sequence by mean frame flux (preserving padded frame isolation)
+    if lengths is not None:
+        lengths_dev = lengths.to(images.device)
+        masked_images = images * mask
+        seq_sum = torch.sum(masked_images, dim=(-3, -2, -1), keepdim=True)
+        seq_mean_flux = seq_sum / lengths_dev[:, None, None, None]
+        images = images / (seq_mean_flux + 1e-10)
+    else:
+        seq_mean_flux = torch.mean(torch.sum(images, dim=(-2, -1), keepdim=True), dim=1, keepdim=True)
+        images = images / (seq_mean_flux + 1e-10)
+
+    # Pre-calculate Fourier transforms and noise variance
+    images_ft = torch.fft.fft2(images, dim=(-2, -1), norm="ortho")
+    variance = torch.tensor([1e-3, 1e-3], dtype=torch.float32, device=device)
+
+    # 3. Setup Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    print("\n--- Starting 50 Optimization Steps ---")
+    model.train()
+
+    for step in range(1, 51):
+        optimizer.zero_grad()
+
+        # Forward pass
+        coeff, num, den, psf, otf, loss = model(images, images_ft, variance, lengths=lengths)
+
+        # Check for NaN/Inf in loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"❌ [Step {step}] Loss exploded to NaN/Inf!")
+            break
+
+        # ------------------------------------------------------------------
+        # ADD GRADIENT DEBUGGING LINES HERE (Right before loss.backward())
+        # ------------------------------------------------------------------
+        if step == 1:
+            print(f"DEBUG: loss.requires_grad = {loss.requires_grad}")
+            print(f"DEBUG: coeff.requires_grad = {coeff.requires_grad}")
+            print(f"DEBUG: C43.weight.requires_grad = {model.lstm.C43.weight.requires_grad}")
+        # ------------------------------------------------------------------
+
+        # Backward pass
+        loss.backward()
+
+        # Gradient clipping to prevent sudden spikes during initial steps
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        optimizer.step()
+
+        if step % 10 == 0 or step == 1:
+            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6f} | Grad Norm: {grad_norm.item():.4f}")
+
+    print("\n✅ Verification complete! Gradients and backward pass are functioning properly.")
+
 if __name__ == "__main__":
-    device = 'mps'
-    n_modes = 44
-    n_frames = 5
-    pixel_size = 0.042
-    telescope_diameter = 150.0
-    central_obscuration = 0.0
-    wavelength = 8000.0
-    basis_for_wavefront = 'kl'
-    npix_image = 128
-
-    model = Network(device=device, n_modes=n_modes, n_frames=n_frames, pixel_size=pixel_size,
-                    telescope_diameter=telescope_diameter, central_obscuration=central_obscuration,
-                    wavelength=wavelength, basis_for_wavefront=basis_for_wavefront, npix_image=npix_image)
-    
-    model = model.to(device)
-    
-
-    images = torch.rand((2, n_frames, npix_image, npix_image), dtype=torch.float32).to(device)
-    images_ft = torch.fft.fft2(images, dim=(-2, -1))
-    variance = torch.ones((2,), dtype=torch.float32).to(device)
-
-    coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
+    run_debug_test()
