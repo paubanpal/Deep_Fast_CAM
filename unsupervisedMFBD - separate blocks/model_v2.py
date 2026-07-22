@@ -11,6 +11,9 @@ import torch.nn.functional as F
 # Import your image reading library (e.g., fits from astropy, imageio, or numpy)
 #from astropy.io import fits 
 import tifffile as tiff
+import json
+from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -291,33 +294,65 @@ class Network(nn.Module):
         self.lstm = LSTM(n_modes=self.n_modes, n_lstm=256)
         self.lstm.weights_init()
 
-    def compute_psfs(self, coeff, target_shape=None):
-        """Compute the PSFs and their Fourier transform from a set of modes
+    def update_telescope_basis(self, pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image):
+        """Recalculates the optical pupil mask and wavefront modal basis for a specific telescope configuration."""
         
-        Args:
-            wavefront_focused ([type]): wavefront of the focused image
-            illum ([type]): pupil aperture
-            diversity ([type]): diversity for this specific images
+        # Create a signature dict to check if recalculation is needed
+        new_config = (pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image)
+        if self.current_config == new_config:
+            return  # Skip expensive recalculation if configuration is identical to previous sample
         
-        """
+        self.pixel_size = pixel_size
+        self.telescope_diameter = telescope_diameter
+        self.central_obscuration = central_obscuration
+        self.wavelength = wavelength
+        self.npix_image = npix_image
+        self.current_config = new_config
 
-        # CHANGE: Interpolate pupil mask and modal basis if incoming images vary from npix_image
-        pupil = self.pupil
-        basis = self.basis
-        
-        if target_shape is not None and (target_shape[0] != self.npix_image or target_shape[1] != self.npix_image):
-            H, W = target_shape
-            # FIX 2: Explicit indexing [0, 0] / [0] prevents Squeeze dimension bugs
-            pupil = F.interpolate(pupil[None, None, :, :], size=(H, W), mode='nearest')[0, 0]
-            basis = F.interpolate(basis[None, :, :, :], size=(H, W), mode='bilinear', align_corners=False)[0]
+        # Compute PSF scale & overfill
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
+        if (self.overfill < 1.0):
+            raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
+            
+        # Compute exact telescope aperture
+        pupil = util.aperture(npix=self.npix_image, cent_obs=self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
+        pupil = torch.tensor(pupil.astype('float32'), device=self.device)
+            
+        # Compute optical modal basis
+        if (self.basis_for_wavefront == 'zernike'):
+            Z_machine = zern.ZernikeNaive(mask=[])
+            x = np.linspace(-1, 1, self.npix_image)
+            xx, yy = np.meshgrid(x, x)
+            rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
+            theta = np.arctan2(yy, xx)
+            aperture_mask = rho <= 1.0
 
-        # Compute real and imaginary parts of the pupil
-        wavefront = torch.einsum('ij,jkl->ikl', coeff, basis)
+            basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
+            for j in range(self.n_modes):
+                n, m = zern.zernIndex(j+2)
+                Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
+                basis[j,:,:] = Z * aperture_mask
 
-        # Compute the generalized pupil function
-        phase = pupil[None, :, :] * torch.exp(1j * wavefront)
+        elif (self.basis_for_wavefront == 'kl'):
+            kl = kl_modes.KL()
+            basis = kl.precalculate_covariance(npix_image=self.npix_image, n_modes_max=self.n_modes, first_noll=1, overfill=self.overfill)
 
-        # Compute FFT of the pupil function and compute autocorrelation
+        zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32, device=self.device)
+
+        # Register buffers dynamically on target device
+        self.register_buffer('zeros', zeros, persistent=False)
+        self.register_buffer('pupil', pupil, persistent=False)
+        self.register_buffer('basis', torch.tensor(basis.astype('float32'), device=self.device), persistent=False)
+
+    def compute_psfs(self, coeff):
+        """Compute exact physical PSFs and OTFs from estimated wavefront coefficients."""
+        # Compute real phase screens using current telescope basis
+        wavefront = torch.einsum('ij,jkl->ikl', coeff, self.basis)
+
+        # Compute generalized pupil function
+        phase = self.pupil[None, :, :] * torch.exp(1j * wavefront)
+
+        # Compute Fourier transform and autocorrelation
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
 
@@ -466,6 +501,71 @@ class Network(nn.Module):
         
         return coeff_corrected, numerator, denominator, psf, psf_ft, loss
     
+class MultiTelescopeStackDataset(Dataset):
+    def __init__(self, root_dir: str | Path, n_frames: int = 10, crop_dim: int | None = None):
+        self.root_path = Path(root_dir)
+        self.n_frames = n_frames
+        self.crop_dim = crop_dim  # Optional: set to e.g. 128 if you want to force center-cropping across all images
+        self.samples = []
+        
+        # Iterate over subdirectories in root_dir
+        for tel_dir in self.root_path.iterdir():
+            if not tel_dir.is_dir():
+                continue
+                
+            config_path = tel_dir / "config.json"
+            if not config_path.exists():
+                print(f"Warning: Skipping {tel_dir.name} because config.json was not found.")
+                continue
+                
+            # Read telescope configuration (diameter, obscuration, pixel_size, wavelength)
+            with open(config_path, "r", encoding="utf-8") as f:
+                tel_config = json.load(f)
+                
+            # Collect all .tiff and .tif stacks in this folder
+            tiff_files = list(tel_dir.glob("*.tiff")) + list(tel_dir.glob("*.tif"))
+            
+            for tiff_path in tiff_files:
+                self.samples.append({
+                    "path": tiff_path,
+                    "config": tel_config
+                })
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample_info = self.samples[idx]
+        tiff_path: Path = sample_info["path"]
+        
+        # Read raw array directly using Path
+        raw_data = tiff.imread(tiff_path).astype("float32")
+        
+        # Extract first N frames
+        frames = raw_data[:self.n_frames]
+        Nf, H, W = frames.shape
+        
+        # Dynamically determine image size from the image itself
+        if self.crop_dim is not None and (H > self.crop_dim or W > self.crop_dim):
+            start_h = (H - self.crop_dim) // 2
+            start_w = (W - self.crop_dim) // 2
+            frames = frames[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
+            target_dim = self.crop_dim
+        else:
+            # Keep native dimensions (assumes H == W for telescope images)
+            target_dim = H  
+
+        frames_tensor = torch.tensor(frames, dtype=torch.float32)
+
+        # Build dynamic runtime config
+        active_config = sample_info["config"].copy()
+        active_config["target_dim"] = target_dim
+
+        return {
+            "images": frames_tensor,
+            "config": active_config,
+            "filename": tiff_path.name
+        }
 
 # if __name__ == "__main__":
 #     device = 'mps'
@@ -492,203 +592,59 @@ class Network(nn.Module):
 #     coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
 
 
-
-def run_debug_test():
-    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
-    print(f"--- Running Debug Test on [{device.upper()}] ---")
-
-    # 1. Instantiate network
-    model = Network(
-        device=device,
-        n_modes=44,
-        n_frames=10,  # Max frames per sequence
-        pixel_size=0.042,
-        telescope_diameter=150.0,
-        central_obscuration=0.0,
-        wavelength=8000.0,
-        basis_for_wavefront='kl',
-        npix_image=128
-    ).to(device)
-
-    # Enable anomaly detection to catch NaN/Inf gradients immediately
-    torch.autograd.set_detect_anomaly(True)
-
-    # 2. Create a synthetic mini-batch with variable lengths
-    batch_size = 2
-    max_frames = 10
-    H, W = 128, 128
-
-    # Sequence lengths: Item 0 has 7 real frames, Item 1 has 10 real frames
-    lengths = torch.tensor([7, 10], dtype=torch.int64).to(device)
-    
-    # # OLD (Uncorrelated Noise):
-    # # Generate dummy image batch [B, Nf, H, W]
-    # images = torch.rand((batch_size, max_frames, H, W), dtype=torch.float32, device=device)
-
-    # NEW (Spatially Coherent Synthetic Object - Gaussian Spot):
-    y, x = torch.meshgrid(torch.linspace(-1, 1, H, device=device), torch.linspace(-1, 1, W, device=device), indexing='ij')
-    radius = torch.sqrt(x**2 + y**2)
-    base_object = torch.exp(-radius**2 / (2 * 0.1**2))  # Sharp Gaussian spot at center
-    
-    # Broadcast to [B, Nf, H, W] and add slight frame-to-frame variations
-    images = base_object[None, None, :, :].repeat(batch_size, max_frames, 1, 1)
-    images = images + 0.05 * torch.rand_like(images) # Add light background noise
-    
-    # Zero out padded frames in input tensor to reflect actual padded data
-    mask = (torch.arange(max_frames, device=device)[None, :] < lengths[:, None])[:, :, None, None]
-    images = images * mask
-
-    # Before passing to the model or computing FFTs:
-    # Method A: Normalizes sequence by mean frame flux (preserving padded frame isolation)
-    if lengths is not None:
-        lengths_dev = lengths.to(images.device)
-        masked_images = images * mask
-        seq_sum = torch.sum(masked_images, dim=(-3, -2, -1), keepdim=True)
-        seq_mean_flux = seq_sum / lengths_dev[:, None, None, None]
-        images = images / (seq_mean_flux + 1e-10)
-    else:
-        seq_mean_flux = torch.mean(torch.sum(images, dim=(-2, -1), keepdim=True), dim=1, keepdim=True)
-        images = images / (seq_mean_flux + 1e-10)
-
-    # Pre-calculate Fourier transforms and noise variance
-    images_ft = torch.fft.fft2(images, dim=(-2, -1), norm="ortho")
-    variance = torch.tensor([1e-3, 1e-3], dtype=torch.float32, device=device)
-
-    # 3. Setup Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-
-    print("\n--- Starting 50 Optimization Steps ---")
-    model.train()
-
-    for step in range(1, 51):
-        optimizer.zero_grad()
-
-        # Forward pass
-        coeff, num, den, psf, otf, loss = model(images, images_ft, variance, lengths=lengths)
-
-        # Check for NaN/Inf in loss
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"❌ [Step {step}] Loss exploded to NaN/Inf!")
-            break
-
-        # ------------------------------------------------------------------
-        # ADD GRADIENT DEBUGGING LINES HERE (Right before loss.backward())
-        # ------------------------------------------------------------------
-        if step == 1:
-            print(f"DEBUG: loss.requires_grad = {loss.requires_grad}")
-            print(f"DEBUG: coeff.requires_grad = {coeff.requires_grad}")
-            print(f"DEBUG: C43.weight.requires_grad = {model.lstm.C43.weight.requires_grad}")
-        # ------------------------------------------------------------------
-
-        # Backward pass
-        loss.backward()
-
-        if step == 1:
-            print(f"CNN A01 weight grad max:  {model.cnn.A01.conv.weight.grad.abs().max().item():.4e}")
-            print(f"LSTM C43 weight grad max: {model.lstm.C43.weight.grad.abs().max().item():.4e}")
-
-        # Gradient clipping to prevent sudden spikes during initial steps
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        optimizer.step()
-
-        if step % 10 == 0 or step == 1:
-            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6e} | Grad Norm: {grad_norm.item():.4e}")
-
-    print("\n✅ Verification complete! Gradients and backward pass are functioning properly.")
-
-def run_real_stack_test(tiff_path):
-    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
-    print(f"--- Running Real Data Test on [{device.upper()}] ---")
-
-    # 1. Load Real Stack using tifffile
-    # Reads array with shape [Total_Frames, H, W]
-    raw_data = tiff.imread(tiff_path).astype("float32")
-
-    # Extract first 10 frames: Shape -> [10, H, W]
-    real_frames = raw_data[:10]
-    
-    # If spatial dimensions aren't 128x128, crop center to match npix_image
-    Nf, H, W = real_frames.shape
-    target_dim = 128
-    if H > target_dim or W > target_dim:
-        start_h = (H - target_dim) // 2
-        start_w = (W - target_dim) // 2
-        real_frames = real_frames[:, start_h:start_h+target_dim, start_w:start_w+target_dim]
-        H, W = target_dim, target_dim
-
-    # Convert to Tensor & Add Batch Dimension -> [1, 10, H, W]
-    images = torch.tensor(real_frames, dtype=torch.float32, device=device).unsqueeze(0)
-    batch_size, max_frames, H, W = images.shape
-    lengths = torch.tensor([max_frames], dtype=torch.int64, device=device)
-
-    # 2. Instantiate Model
-    model = Network(
-        device=device,
-        n_modes=44,
-        n_frames=max_frames,
-        pixel_size=0.025,
-        telescope_diameter=256.0,
-        central_obscuration=51.0,
-        wavelength=8250.0,
-        basis_for_wavefront='kl',
-        npix_image=H
-    ).to(device)
-
-    # Enable anomaly detection to catch potential issues
-    torch.autograd.set_detect_anomaly(True)
-
-    # 3. Method A Flux Normalization (preserves frame energy scale)
-    lengths_dev = lengths.to(device)
-    seq_sum = torch.sum(images, dim=(-3, -2, -1), keepdim=True)
-    seq_mean_flux = seq_sum / lengths_dev[:, None, None, None]
-    images = images / (seq_mean_flux + 1e-10)
-
-    # Pre-calculate 2D FFTs with orthogonal normalization
-    images_ft = torch.fft.fft2(images, dim=(-2, -1), norm="ortho")
-    variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
-
-    # 4. Run Optimization Loop
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss_scale = 1e3  # Scale loss to pull gradients into the ~1e-3 range
-    model.train()
-
-    print(f"Loaded TIFF shape: {raw_data.shape}")
-    print(f"Model Input Tensor Shape: {list(images.shape)}")
-    print("\n--- Starting 50 Optimization Steps on Real TIFF Data ---")
-
-    for step in range(1, 51):
-        optimizer.zero_grad()
-
-        coeff, num, den, psf, otf, loss = model(images, images_ft, variance, lengths=lengths)
-
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"❌ [Step {step}] Loss exploded to NaN/Inf!")
-            break
-
-        if step == 1:
-            print(f"DEBUG: loss.requires_grad = {loss.requires_grad}")
-            print(f"DEBUG: coeff.requires_grad = {coeff.requires_grad}")
-
-        # Scale loss before calling backward so gradients sit around ~1e-3
-        scaled_loss = loss * loss_scale
-        scaled_loss.backward()
-
-        if step == 1:
-            print(f"CNN A01 weight grad max:  {model.cnn.A01.conv.weight.grad.abs().max().item():.4e}")
-            print(f"LSTM C43 weight grad max: {model.lstm.C43.weight.grad.abs().max().item():.4e}")
-
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        if step % 10 == 0 or step == 1:
-            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6e} | Grad Norm: {grad_norm.item():.4e}")
-
-    print("\n✅ Real TIFF data test complete!")
-
 if __name__ == "__main__":
-    # Provide the path to your real image data file (.fits / .npy)
-    run_real_stack_test(r"I:\Departamentos\Óptica\paulabp\master\TFM\MFBD images\cropped_shifted_originals\NOT\binarias\CHR181_NOT_cropped_shifted_128.tif")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # 1. Instantiate multi-telescope dataset and loader
+    data_path = Path("i:/Departamentos/Óptica/paulabp/master/TFM/codigo/data")
+    dataset = MultiTelescopeStackDataset(root_dir=data_path, n_frames=10)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-# if __name__ == "__main__":
-#     run_debug_test()
+    # 2. Instantiate Network once
+    model = Network(device=device, n_modes=44, basis_for_wavefront='kl').to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_scale = 1e3
+
+    # 3. Training Loop across multiple telescopes
+    model.train()
+    for epoch in range(1, 11):
+        for step, batch in enumerate(dataloader, start=1):
+            images = batch["images"].to(device)  # Shape: [1, Nf, H, W]
+            
+            # Extract image height/width directly from batch tensor
+            H, W = images.shape[-2], images.shape[-1]
+
+            # Extract static telescope optics from JSON config
+            cfg = {k: (v[0].item() if torch.is_tensor(v[0]) else v[0]) for k, v in batch["config"].items()}
+
+            # Update model basis with exact optics and current image spatial resolution
+            model.update_telescope_basis(
+                pixel_size=cfg["pixel_size"],
+                telescope_diameter=cfg["telescope_diameter"],
+                central_obscuration=cfg.get("central_obscuration", 0.0),
+                wavelength=cfg["wavelength"],
+                npix_image=H  # Assumes square images (H == W)
+            )
+            
+            # B. Method A sequence flux normalization (FIXED FOR 4D TENSORS)
+            # Sum spatial dimensions per frame, then divide by frame count Nf
+            seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)  # Shape: [1, Nf, 1, 1]
+            seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1] # Mean stack flux
+            images_norm = images / (seq_mean_flux + 1e-10)
+            
+            # C. Fourier transform & noise variance
+            images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
+            variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+            lengths = torch.tensor([images.shape[1]], dtype=torch.int64, device=device)
+
+            # D. Forward pass & backward step
+            optimizer.zero_grad()
+            coeff, num, den, psf, otf, loss = model(images_norm, images_ft, variance, lengths=lengths)
+            
+            scaled_loss = loss * loss_scale
+            scaled_loss.backward()
+            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            print(f"Epoch {epoch:02d} | Stack: {batch['filename'][0]} | Tel Diam: {cfg['telescope_diameter']} cm | MOMFBD Loss: {loss.item():.6e}")
