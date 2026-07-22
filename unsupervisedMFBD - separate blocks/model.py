@@ -8,6 +8,9 @@ import zern
 import kl_modes
 from einops import rearrange, repeat
 import torch.nn.functional as F
+# Import your image reading library (e.g., fits from astropy, imageio, or numpy)
+#from astropy.io import fits 
+import tifffile as tiff
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -518,8 +521,18 @@ def run_debug_test():
     # Sequence lengths: Item 0 has 7 real frames, Item 1 has 10 real frames
     lengths = torch.tensor([7, 10], dtype=torch.int64).to(device)
     
-    # Generate dummy image batch [B, Nf, H, W]
-    images = torch.rand((batch_size, max_frames, H, W), dtype=torch.float32, device=device)
+    # # OLD (Uncorrelated Noise):
+    # # Generate dummy image batch [B, Nf, H, W]
+    # images = torch.rand((batch_size, max_frames, H, W), dtype=torch.float32, device=device)
+
+    # NEW (Spatially Coherent Synthetic Object - Gaussian Spot):
+    y, x = torch.meshgrid(torch.linspace(-1, 1, H, device=device), torch.linspace(-1, 1, W, device=device), indexing='ij')
+    radius = torch.sqrt(x**2 + y**2)
+    base_object = torch.exp(-radius**2 / (2 * 0.1**2))  # Sharp Gaussian spot at center
+    
+    # Broadcast to [B, Nf, H, W] and add slight frame-to-frame variations
+    images = base_object[None, None, :, :].repeat(batch_size, max_frames, 1, 1)
+    images = images + 0.05 * torch.rand_like(images) # Add light background noise
     
     # Zero out padded frames in input tensor to reflect actual padded data
     mask = (torch.arange(max_frames, device=device)[None, :] < lengths[:, None])[:, :, None, None]
@@ -583,6 +596,81 @@ def run_debug_test():
             print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6e} | Grad Norm: {grad_norm.item():.4e}")
 
     print("\n✅ Verification complete! Gradients and backward pass are functioning properly.")
+
+def run_real_stack_test(fits_path):
+    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+    print(f"--- Running Real Data Test on [{device.upper()}] ---")
+
+    # 1. Load Real Stack (e.g., FITS file containing [10, H, W] or longer)
+    with fits.open(fits_path) as hdul:
+        raw_data = hdul[0].data.astype(np.float32)
+
+    # Extract first 10 frames: Shape -> [10, H, W]
+    real_frames = raw_data[:10]
+    
+    # If spatial dimensions aren't 128x128, crop center or resize to fit model npix_image
+    Nf, H, W = real_frames.shape
+    if H > 128 or W > 128:
+        start_h = (H - 128) // 2
+        start_w = (W - 128) // 2
+        real_frames = real_frames[:, start_h:start_h+128, start_w:start_w+128]
+
+    # Convert to Tensor & Add Batch Dimension -> [1, 10, 128, 128]
+    images = torch.tensor(real_frames, dtype=torch.float32, device=device).unsqueeze(0)
+    batch_size, max_frames, H, W = images.shape
+    lengths = torch.tensor([max_frames], dtype=torch.int64, device=device)
+
+    # 2. Instantiate Model
+    model = Network(
+        device=device,
+        n_modes=44,
+        n_frames=max_frames,
+        pixel_size=0.042,
+        telescope_diameter=150.0,
+        central_obscuration=0.0,
+        wavelength=8000.0,
+        basis_for_wavefront='kl',
+        npix_image=H
+    ).to(device)
+
+    # 3. Method A Flux Normalization
+    lengths_dev = lengths.to(device)
+    seq_sum = torch.sum(images, dim=(-3, -2, -1), keepdim=True)
+    seq_mean_flux = seq_sum / lengths_dev[:, None, None, None]
+    images = images / (seq_mean_flux + 1e-10)
+
+    # Pre-calculate 2D FFTs
+    images_ft = torch.fft.fft2(images, dim=(-2, -1), norm="ortho")
+    variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+
+    # 4. Run Optimization Loop
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    model.train()
+
+    print(f"Image Stack Input Shape: {list(images.shape)}")
+    print("\n--- Starting 50 Optimization Steps on Real Data ---")
+
+    for step in range(1, 51):
+        optimizer.zero_grad()
+
+        coeff, num, den, psf, otf, loss = model(images, images_ft, variance, lengths=lengths)
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"❌ [Step {step}] Loss exploded to NaN/Inf!")
+            break
+
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        if step % 10 == 0 or step == 1:
+            print(f"Step {step:02d} | MOMFBD Loss: {loss.item():.6e} | Grad Norm: {grad_norm.item():.4e}")
+
+    print("\n✅ Real data execution completed successfully!")
+
+if __name__ == "__main__":
+    # Provide the path to your real image data file (.fits / .npy)
+    run_real_stack_test("path_to_your_real_stack.fits")
 
 if __name__ == "__main__":
     run_debug_test()

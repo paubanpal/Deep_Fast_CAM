@@ -10,10 +10,7 @@ cd -
 To activate the virtual environment stored somewhere else from my working directory:
 export PATH="/home/paulabp/miniconda3/envs/tfm_conda_venv/bin:$PATH"
 
-source /home/paulabp/miniconda3/etc/profile.d/conda.sh
-conda activate tfm_conda_venv
-
-/home/paulabp/miniconda3/envs/tfm_conda_venv/bin/python main.py
+activartfm
 
 To save a new requirements file from the HPC:
 conda env export --no-builds > environment.yml
