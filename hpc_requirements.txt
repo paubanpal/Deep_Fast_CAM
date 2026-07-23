@@ -55,6 +55,7 @@ sympy==1.14.0
 threadpoolctl==3.6.0
 tifffile==2026.6.1
 torch==2.12.1
+torchvision==0.27.1
 -e git+https://github.com/aasensio/torchmfbd.git@5fafbebfd55b453ca7ffdc01e193d80d079b9c93#egg=torchmfbd
 tqdm==4.68.3
 triton==3.7.1

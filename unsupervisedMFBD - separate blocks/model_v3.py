@@ -13,7 +13,12 @@ import torch.nn.functional as F
 import tifffile as tiff
 import json
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
+import matplotlib
+matplotlib.use('Agg')  # Headless backend for HPC clusters (no display needed)
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF
+import random
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -567,6 +572,45 @@ class MultiTelescopeStackDataset(Dataset):
             "filename": tiff_path.name
         }
 
+# Define an Augmentation Wrapper Class for the Training Split
+class AugmentedDatasetWrapper(torch.utils.data.Dataset):
+    """
+    Applies consistent spatial augmentations across all frames in a stack.
+    Must maintain identical spatial transformations for every frame in the same sequence!
+    """
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        images = sample["images"]  # Shape: (N_frames, H, W)
+        
+        # Determine random transformation parameters for THIS stack
+        angle = random.choice([0, 90, 180, 270])
+        do_hflip = random.random() > 0.5
+        do_vflip = random.random() > 0.5
+
+        # Apply the exact same transform across ALL temporal frames in the stack
+        augmented_frames = []
+        for frame in images:
+            # Add channel dimension for torchvision: (1, H, W)
+            frame_tensor = frame.unsqueeze(0)
+            
+            if angle != 0:
+                frame_tensor = TF.rotate(frame_tensor, angle)
+            if do_hflip:
+                frame_tensor = TF.hflip(frame_tensor)
+            if do_vflip:
+                frame_tensor = TF.vflip(frame_tensor)
+                
+            augmented_frames.append(frame_tensor.squeeze(0))
+
+        sample["images"] = torch.stack(augmented_frames, dim=0)
+        return sample
+
 # if __name__ == "__main__":
 #     device = 'mps'
 #     n_modes = 44
@@ -591,53 +635,88 @@ class MultiTelescopeStackDataset(Dataset):
 
 #     coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
 
-
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # 1. Instantiate multi-telescope dataset and loader
-    data_path = Path(r"I:\Departamentos\Óptica\paulabp\master\TFM\images_networks\originals_cropped")
-    dataset = MultiTelescopeStackDataset(root_dir=data_path, n_frames=10)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    # -------------------------------------------------------------
+    # 1. Dataset & Train / Val / Test Splitting
+    # -------------------------------------------------------------
+    data_path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/images_networks/originals_cropped")
+    full_dataset = MultiTelescopeStackDataset(root_dir=data_path, n_frames=10)
+    
+    total_samples = len(full_dataset)
+    print(f"Total dataset stacks: {total_samples}")
+    
+    # Define split sizes (e.g., 10 train, 2 val, 2 test)
+    val_size = 2
+    test_size = 2
+    train_size = total_samples - val_size - test_size
+    
+    # Seed generator for reproducible splits across HPC runs
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size, test_size], generator=generator
+    )
 
-    # 2. Instantiate Network once
+    # Wrap ONLY the training dataset
+    train_dataset_augmented = AugmentedDatasetWrapper(train_dataset)
+
+    # Individual DataLoaders (batch_size=1)
+    train_loader = DataLoader(train_dataset_augmented, batch_size=1, shuffle=True)
+    val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+    # -------------------------------------------------------------
+    # 2. Model, Optimizer & Early Stopping Setup
+    # -------------------------------------------------------------
     model = Network(device=device, n_modes=44, basis_for_wavefront='kl').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_scale = 1e3
+    
+    # Early Stopping Configuration
+    patience = 15             # Epochs to wait after last improvement
+    patience_counter = 0
+    best_val_loss = float('inf')
+    num_epochs = 100
+    
+    # Output directories for HPC saving
+    save_dir = Path("./run_outputs")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    best_model_path = save_dir / "best_model.pt"
 
-    # 3. Training Loop across multiple telescopes
-    model.train()
-    for epoch in range(1, 11):
-        for step, batch in enumerate(dataloader, start=1):
-            images = batch["images"].to(device)  # Shape: [1, Nf, H, W]
-            
-            # Extract image height/width directly from batch tensor
+    train_loss_history = []
+    val_loss_history = []
+
+    # -------------------------------------------------------------
+    # 3. Training & Validation Loop
+    # -------------------------------------------------------------
+    for epoch in range(1, num_epochs + 1):
+        # --- TRAINING PHASE ---
+        model.train()
+        running_train_loss = 0.0
+        
+        for batch in train_loader:
+            images = batch["images"].to(device)
             H, W = images.shape[-2], images.shape[-1]
-
-            # Extract static telescope optics from JSON config
             cfg = {k: (v[0].item() if torch.is_tensor(v[0]) else v[0]) for k, v in batch["config"].items()}
 
-            # Update model basis with exact optics and current image spatial resolution
             model.update_telescope_basis(
                 pixel_size=cfg["pixel_size"],
                 telescope_diameter=cfg["telescope_diameter"],
                 central_obscuration=cfg.get("central_obscuration", 0.0),
                 wavelength=cfg["wavelength"],
-                npix_image=H  # Assumes square images (H == W)
+                npix_image=H
             )
             
-            # B. Method A sequence flux normalization (FIXED FOR 4D TENSORS)
-            # Sum spatial dimensions per frame, then divide by frame count Nf
-            seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)  # Shape: [1, Nf, 1, 1]
-            seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1] # Mean stack flux
+            # Method A sequence flux normalization
+            seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
+            seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
             images_norm = images / (seq_mean_flux + 1e-10)
             
-            # C. Fourier transform & noise variance
             images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
             variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
             lengths = torch.tensor([images.shape[1]], dtype=torch.int64, device=device)
 
-            # D. Forward pass & backward step
             optimizer.zero_grad()
             coeff, num, den, psf, otf, loss = model(images_norm, images_ft, variance, lengths=lengths)
             
@@ -647,4 +726,89 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            print(f"Epoch {epoch:02d} | Stack: {batch['filename'][0]} | Tel Diam: {cfg['telescope_diameter']} cm | MOMFBD Loss: {loss.item():.6e}")
+            running_train_loss += loss.item()
+
+        epoch_train_loss = running_train_loss / len(train_loader)
+        train_loss_history.append(epoch_train_loss)
+
+        # --- VALIDATION PHASE ---
+        model.eval()
+        running_val_loss = 0.0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch["images"].to(device)
+                H, W = images.shape[-2], images.shape[-1]
+                cfg = {k: (v[0].item() if torch.is_tensor(v[0]) else v[0]) for k, v in batch["config"].items()}
+
+                model.update_telescope_basis(
+                    pixel_size=cfg["pixel_size"],
+                    telescope_diameter=cfg["telescope_diameter"],
+                    central_obscuration=cfg.get("central_obscuration", 0.0),
+                    wavelength=cfg["wavelength"],
+                    npix_image=H
+                )
+                
+                seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
+                seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
+                images_norm = images / (seq_mean_flux + 1e-10)
+                
+                images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
+                variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+                lengths = torch.tensor([images.shape[1]], dtype=torch.int64, device=device)
+
+                _, _, _, _, _, loss = model(images_norm, images_ft, variance, lengths=lengths)
+                running_val_loss += loss.item()
+
+        epoch_val_loss = running_val_loss / len(val_loader)
+        val_loss_history.append(epoch_val_loss)
+
+        print(f"Epoch {epoch:03d}/{num_epochs} | Train Loss: {epoch_train_loss:.6e} | Val Loss: {epoch_val_loss:.6e}")
+
+        # --- EARLY STOPPING & CHECKPOINTING ---
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            patience_counter = 0
+            # Save model weights and metadata
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': best_val_loss,
+            }, best_model_path)
+            print(f"Best model saved at epoch {epoch} (Val Loss: {best_val_loss:.6e})")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch}. No validation improvement for {patience} consecutive epochs.")
+                break
+
+    # -------------------------------------------------------------
+    # 4. HPC Export: Save Loss Logs & Render Plot to Disk
+    # -------------------------------------------------------------
+    # Save numerical history as JSON for offline processing
+    history = {
+        "train_loss": train_loss_history,
+        "val_loss": val_loss_history,
+        "best_val_loss": best_val_loss
+    }
+    with open(save_dir / "loss_history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=4)
+
+    # Render loss curve figure without needing an X11 window
+    plt.figure(figsize=(9, 5))
+    plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
+    plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
+    plt.axvline(x=len(train_loss_history) - patience_counter - 1, color="green", linestyle="--", label="Best Model Checkpoint")
+    plt.yscale("log")  # Log scale works great for MOMFBD loss magnitudes (~10^-4)
+    plt.xlabel("Epoch")
+    plt.ylabel("MOMFBD Loss (Log Scale)")
+    plt.title("Multi-Telescope Training and Validation Loss")
+    plt.grid(True, which="both", linestyle="--", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    
+    plt.savefig(save_dir / "loss_plot.png", dpi=300)
+    plt.close()
+    
+    print(f"✅ Training completed. Outputs saved to {save_dir.resolve()}")

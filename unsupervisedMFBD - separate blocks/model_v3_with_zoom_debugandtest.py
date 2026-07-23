@@ -13,7 +13,12 @@ import torch.nn.functional as F
 import tifffile as tiff
 import json
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
+import matplotlib
+matplotlib.use('Agg')  # Headless backend for HPC clusters (no display needed)
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF
+import random
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -567,6 +572,91 @@ class MultiTelescopeStackDataset(Dataset):
             "filename": tiff_path.name
         }
 
+# Define an Augmentation Wrapper Class for the Training Split
+class AugmentedDatasetWrapper(torch.utils.data.Dataset):
+    """
+    Applies consistent spatial augmentations across all frames in a stack.
+    
+    STRATEGY B:
+    - Applies dynamic zooming to 128x128 stacks.
+    - Upscales output tensors to 256x256 to prevent edge pixel loss/cropping.
+    - Updates 'pixel_size' in metadata to ensure exact physical alignment with the OTF.
+    """
+    def __init__(self, dataset, zoom_prob: float = 0.5, zoom_range: tuple = (1.05, 1.25)):
+        self.dataset = dataset
+        self.zoom_prob = zoom_prob
+        self.zoom_range = zoom_range
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        images = sample["images"]  # Shape: (N_frames, H, W)
+        cfg = dict(sample["config"])  # Shallow copy to avoid mutating original dataset state
+        
+        N, H, W = images.shape
+        
+        # 1. Rigid Spatial Transformations (Rotations & Flips)
+        angle = random.choice([0, 90, 180, 270])
+        do_hflip = random.random() > 0.5
+        do_vflip = random.random() > 0.5
+
+        # 2. Strategy B Trigger: Check if this stack is 128x128 and choose dynamic zoom
+        is_128 = (H == 128 and W == 128)
+        zoom_factor = 1.0
+        
+        if is_128 and (random.random() < self.zoom_prob):
+            zoom_factor = random.uniform(*self.zoom_range)  # e.g., 1.15x zoom
+
+        augmented_frames = []
+        for frame in images:
+            # Reshape tensor to (1, 1, H, W) for transformation utilities
+            frame_tensor = frame.unsqueeze(0).unsqueeze(0)
+            
+            # Apply Flips and Rotations
+            if angle != 0:
+                frame_tensor = TF.rotate(frame_tensor, angle)
+            if do_hflip:
+                frame_tensor = TF.hflip(frame_tensor)
+            if do_vflip:
+                frame_tensor = TF.vflip(frame_tensor)
+                
+            # Apply Strategy B Zoom & Rescale to 256x256
+            if is_128:
+                if zoom_factor > 1.0:
+                    # Step A: Apply dynamic zoom by resampling to intermediate size
+                    intermediate_H = int(H * zoom_factor)
+                    intermediate_W = int(W * zoom_factor)
+                    zoomed = F.interpolate(
+                        frame_tensor, size=(intermediate_H, intermediate_W), 
+                        mode='bilinear', align_corners=False
+                    )
+                    
+                    # Step B: Rescale the zoomed FOV up to 256x256 without cropping edges
+                    frame_tensor = F.interpolate(
+                        zoomed, size=(256, 256), mode='bilinear', align_corners=False
+                    )
+                else:
+                    # Standard 2x upscaling without dynamic zoom (128x128 -> 256x256)
+                    frame_tensor = F.interpolate(
+                        frame_tensor, size=(256, 256), mode='bilinear', align_corners=False
+                    )
+
+            augmented_frames.append(frame_tensor.squeeze())
+
+        # Stack back to (N_frames, H_out, W_out)
+        sample["images"] = torch.stack(augmented_frames, dim=0)
+        
+        # 3. CRITICAL PHYSICS UPDATE: Recalculate effective pixel size
+        if is_128:
+            total_scale_factor = 2.0 * zoom_factor  # 2.0x from grid expansion * dynamic zoom
+            cfg["pixel_size"] = cfg["pixel_size"] / total_scale_factor
+            cfg["target_dim"] = 256
+
+        sample["config"] = cfg
+        return sample
+
 # if __name__ == "__main__":
 #     device = 'mps'
 #     n_modes = 44
@@ -591,53 +681,102 @@ class MultiTelescopeStackDataset(Dataset):
 
 #     coeff, num, den, psf, otf, loss = model(images, images_ft, variance=variance)
 
-
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Running test pipeline on device: {device}")
     
-    # 1. Instantiate multi-telescope dataset and loader
-    data_path = Path(r"I:\Departamentos\Óptica\paulabp\master\TFM\images_networks\originals_cropped")
-    dataset = MultiTelescopeStackDataset(root_dir=data_path, n_frames=10)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    # -------------------------------------------------------------
+    # 1. Dataset & Train / Val / Test Splitting
+    # -------------------------------------------------------------
+    # Update this path to point to your local testing directory
+    data_path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/images_networks/multiplied")
+    
+    # Extract only the FIRST 10 FRAMES per stack
+    full_dataset = MultiTelescopeStackDataset(root_dir=data_path, n_frames=10)
+    
+    total_samples = len(full_dataset)
+    print(f"Total dataset stacks found: {total_samples}")
+    
+    # Dynamic split allocation for small testing datasets (e.g. 10 total stacks)
+    if total_samples < 3:
+        raise ValueError("Need at least 3 dataset stacks to create Train/Val/Test splits (1 each minimum).")
+        
+    val_size = max(1, int(0.15 * total_samples))
+    test_size = max(1, int(0.15 * total_samples))
+    train_size = total_samples - val_size - test_size
+    
+    print(f"Split sizes -> Train: {train_size} | Val: {val_size} | Test: {test_size}")
+    
+    # Seed generator for reproducible splits
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size, test_size], generator=generator
+    )
 
-    # 2. Instantiate Network once
+    # Wrap ONLY the training dataset with Strategy B dynamic zooming
+    train_dataset_augmented = AugmentedDatasetWrapper(
+        train_dataset, 
+        zoom_prob=0.5,           # 50% chance of dynamic zooming
+        zoom_range=(1.05, 1.25)  # 5% - 25% zoom range
+    )
+
+    # Individual DataLoaders (batch_size=1)
+    train_loader = DataLoader(train_dataset_augmented, batch_size=1, shuffle=True)
+    val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+    # -------------------------------------------------------------
+    # 2. Model, Optimizer & Early Stopping Setup
+    # -------------------------------------------------------------
     model = Network(device=device, n_modes=44, basis_for_wavefront='kl').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_scale = 1e3
+    
+    # QUICK TEST CONFIGURATION: 5 Epochs & Low Patience
+    num_epochs = 5            # Reduced for fast verification run
+    patience = 3              # Early stopping triggers quickly if no improvement
+    patience_counter = 0
+    best_val_loss = float('inf')
+    
+    # Save directory
+    save_dir = Path("./test_run_outputs")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    best_model_path = save_dir / "best_model.pt"
 
-    # 3. Training Loop across multiple telescopes
-    model.train()
-    for epoch in range(1, 11):
-        for step, batch in enumerate(dataloader, start=1):
-            images = batch["images"].to(device)  # Shape: [1, Nf, H, W]
-            
-            # Extract image height/width directly from batch tensor
+    train_loss_history = []
+    val_loss_history = []
+
+    # -------------------------------------------------------------
+    # 3. Training & Validation Loop
+    # -------------------------------------------------------------
+    for epoch in range(1, num_epochs + 1):
+        # --- TRAINING PHASE ---
+        model.train()
+        running_train_loss = 0.0
+        
+        for batch_idx, batch in enumerate(train_loader):
+            images = batch["images"].to(device)  # Should be shape [1, 10, H, W]
             H, W = images.shape[-2], images.shape[-1]
-
-            # Extract static telescope optics from JSON config
             cfg = {k: (v[0].item() if torch.is_tensor(v[0]) else v[0]) for k, v in batch["config"].items()}
 
-            # Update model basis with exact optics and current image spatial resolution
+            # Updates optics dynamically based on active tensor frame shape
             model.update_telescope_basis(
                 pixel_size=cfg["pixel_size"],
                 telescope_diameter=cfg["telescope_diameter"],
                 central_obscuration=cfg.get("central_obscuration", 0.0),
                 wavelength=cfg["wavelength"],
-                npix_image=H  # Assumes square images (H == W)
+                npix_image=H
             )
             
-            # B. Method A sequence flux normalization (FIXED FOR 4D TENSORS)
-            # Sum spatial dimensions per frame, then divide by frame count Nf
-            seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)  # Shape: [1, Nf, 1, 1]
-            seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1] # Mean stack flux
+            # Sequence flux normalization
+            seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
+            seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
             images_norm = images / (seq_mean_flux + 1e-10)
             
-            # C. Fourier transform & noise variance
             images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
             variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
             lengths = torch.tensor([images.shape[1]], dtype=torch.int64, device=device)
 
-            # D. Forward pass & backward step
             optimizer.zero_grad()
             coeff, num, den, psf, otf, loss = model(images_norm, images_ft, variance, lengths=lengths)
             
@@ -647,4 +786,83 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            print(f"Epoch {epoch:02d} | Stack: {batch['filename'][0]} | Tel Diam: {cfg['telescope_diameter']} cm | MOMFBD Loss: {loss.item():.6e}")
+            running_train_loss += loss.item()
+
+        epoch_train_loss = running_train_loss / len(train_loader)
+        train_loss_history.append(epoch_train_loss)
+
+        # --- VALIDATION PHASE ---
+        model.eval()
+        running_val_loss = 0.0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch["images"].to(device)
+                H, W = images.shape[-2], images.shape[-1]
+                cfg = {k: (v[0].item() if torch.is_tensor(v[0]) else v[0]) for k, v in batch["config"].items()}
+
+                model.update_telescope_basis(
+                    pixel_size=cfg["pixel_size"],
+                    telescope_diameter=cfg["telescope_diameter"],
+                    central_obscuration=cfg.get("central_obscuration", 0.0),
+                    wavelength=cfg["wavelength"],
+                    npix_image=H
+                )
+                
+                seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
+                seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
+                images_norm = images / (seq_mean_flux + 1e-10)
+                
+                images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
+                variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+                lengths = torch.tensor([images.shape[1]], dtype=torch.int64, device=device)
+
+                _, _, _, _, _, loss = model(images_norm, images_ft, variance, lengths=lengths)
+                running_val_loss += loss.item()
+
+        epoch_val_loss = running_val_loss / len(val_loader)
+        val_loss_history.append(epoch_val_loss)
+
+        print(f"Test Epoch {epoch:02d}/{num_epochs:02d} | Train Loss: {epoch_train_loss:.6e} | Val Loss: {epoch_val_loss:.6e}")
+
+        # --- CHECKPOINTING ---
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            patience_counter = 0
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': best_val_loss,
+            }, best_model_path)
+            print(f"  --> Checkpoint saved at epoch {epoch}")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping triggered early during testing at epoch {epoch}.")
+                break
+
+    # -------------------------------------------------------------
+    # 4. Save Test Outputs
+    # -------------------------------------------------------------
+    history = {
+        "train_loss": train_loss_history,
+        "val_loss": val_loss_history,
+        "best_val_loss": best_val_loss
+    }
+    with open(save_dir / "test_loss_history.json", "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=4)
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(train_loss_history, label="Training Loss")
+    plt.plot(val_loss_history, label="Validation Loss")
+    plt.yscale("log")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Sanity Check Test Run")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / "test_loss_plot.png", dpi=150)
+    plt.close()
+    
+    print(f"✅ Sanity check complete. Results saved to {save_dir.resolve()}")
