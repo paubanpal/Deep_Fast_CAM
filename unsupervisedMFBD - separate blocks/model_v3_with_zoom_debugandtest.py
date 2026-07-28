@@ -237,6 +237,10 @@ class Network(nn.Module):
         
         super().__init__()
 
+        # Initialize configuration tracking attribute
+        self.current_config = None
+        self.basis_cache = {}  # Store computed (pupil, basis, zeros) per optical signature for KL modes (avoids recalculating KL modes for each zoomed image)
+
         self.n_modes = n_modes
         self.n_frames = n_frames
         self.pixel_size = pixel_size
@@ -247,10 +251,10 @@ class Network(nn.Module):
         self.basis_for_wavefront = basis_for_wavefront
         self.device = device
 
-        print(f"Wavelength : {self.wavelength} A")
-        print(f"Diameter : {self.telescope_diameter} cm")
-        print(f"Central obscuration : {self.central_obscuration} cm")
-        print(f"Pixel size : {self.pixel_size} arcsec")
+        # print(f"Wavelength : {self.wavelength} A")
+        # print(f"Diameter : {self.telescope_diameter} cm")
+        # print(f"Central obscuration : {self.central_obscuration} cm")
+        # print(f"Pixel size : {self.pixel_size} arcsec")
 
         # Compute PSF scale, which depends on the wavelength, telescope diameter and pixel size. This is used to compute the overfill of the pupil
         # so that the final PSF has the correct pixel size
@@ -300,39 +304,53 @@ class Network(nn.Module):
         self.lstm.weights_init()
 
     def update_telescope_basis(self, pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image):
-        """Recalculates the optical pupil mask and wavefront modal basis for a specific telescope configuration."""
+        """Recalculates or retrieves from cache the optical pupil mask and wavefront modal basis for a telescope configuration."""
         
-        # Create a signature dict to check if recalculation is needed
-        new_config = (pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image)
+        # Round pixel_size slightly to avoid float precision differences causing cache misses
+        new_config = (round(pixel_size, 8), telescope_diameter, central_obscuration, wavelength, npix_image)
+        
+        # 1. Fast Path: Active state already matches requested configuration
         if self.current_config == new_config:
-            return  # Skip expensive recalculation if configuration is identical to previous sample
-        
-        self.pixel_size = pixel_size
-        self.telescope_diameter = telescope_diameter
-        self.central_obscuration = central_obscuration
-        self.wavelength = wavelength
-        self.npix_image = npix_image
-        self.current_config = new_config
+            return
 
-        # Compute PSF scale & overfill
-        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
+        # Print whenever a new telescope config from config.json is activated
+        print(f"[Optics Update] Loaded from config.json -> λ: {wavelength} Å, D: {telescope_diameter} cm, Obs: {central_obscuration} cm, Pixel: {pixel_size:.6f} arcsec (Grid: {npix_image}x{npix_image})")
+
+        # 2. Fast Path: Retrieve precomputed basis from cache
+        if new_config in self.basis_cache:
+            pupil, basis_tensor, zeros = self.basis_cache[new_config]
+            self.pupil = pupil
+            self.basis = basis_tensor
+            self.zeros = zeros
+            
+            # Update current state metadata safely after hit
+            self.pixel_size = pixel_size
+            self.telescope_diameter = telescope_diameter
+            self.central_obscuration = central_obscuration
+            self.wavelength = wavelength
+            self.npix_image = npix_image
+            self.current_config = new_config
+            return
+
+        # 3. Slow Path: Compute optical basis for new configuration
+        self.overfill = util.psf_scale(wavelength, telescope_diameter, pixel_size)                 
         if (self.overfill < 1.0):
-            raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
+            raise Exception(f"Pixel size {pixel_size} arcsec is not small enough to model D={telescope_diameter} cm")
             
         # Compute exact telescope aperture
-        pupil = util.aperture(npix=self.npix_image, cent_obs=self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
+        pupil = util.aperture(npix=npix_image, cent_obs=central_obscuration / telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'), device=self.device)
             
         # Compute optical modal basis
         if (self.basis_for_wavefront == 'zernike'):
             Z_machine = zern.ZernikeNaive(mask=[])
-            x = np.linspace(-1, 1, self.npix_image)
+            x = np.linspace(-1, 1, npix_image)
             xx, yy = np.meshgrid(x, x)
             rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
             theta = np.arctan2(yy, xx)
             aperture_mask = rho <= 1.0
 
-            basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
+            basis = np.zeros((self.n_modes, npix_image, npix_image))
             for j in range(self.n_modes):
                 n, m = zern.zernIndex(j+2)
                 Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
@@ -340,16 +358,26 @@ class Network(nn.Module):
 
         elif (self.basis_for_wavefront == 'kl'):
             kl = kl_modes.KL()
-            basis = kl.precalculate_covariance(npix_image=self.npix_image, n_modes_max=self.n_modes, first_noll=1, overfill=self.overfill)
+            basis = kl.precalculate_covariance(npix_image=npix_image, n_modes_max=self.n_modes, first_noll=1, overfill=self.overfill)
 
-        zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32, device=self.device)
+        zeros = torch.zeros((npix_image, npix_image, 1), dtype=torch.float32, device=self.device)
+        basis_tensor = torch.tensor(basis.astype('float32'), device=self.device)
 
-        # Register buffers dynamically on target device
-        self.register_buffer('zeros', zeros, persistent=False)
-        self.register_buffer('pupil', pupil, persistent=False)
-        self.register_buffer('basis', torch.tensor(basis.astype('float32'), device=self.device), persistent=False)
+        # Store in cache
+        self.basis_cache[new_config] = (pupil, basis_tensor, zeros)
 
-    def compute_psfs(self, coeff):
+        # Update active state
+        self.pupil = pupil
+        self.basis = basis_tensor
+        self.zeros = zeros
+        self.pixel_size = pixel_size
+        self.telescope_diameter = telescope_diameter
+        self.central_obscuration = central_obscuration
+        self.wavelength = wavelength
+        self.npix_image = npix_image
+        self.current_config = new_config
+
+    def compute_psfs(self, coeff, target_shape=None):
         """Compute exact physical PSFs and OTFs from estimated wavefront coefficients."""
         # Compute real phase screens using current telescope basis
         wavefront = torch.einsum('ij,jkl->ikl', coeff, self.basis)
@@ -362,7 +390,7 @@ class Network(nn.Module):
         psf = (torch.conj(ft) * ft).real
 
         # Normalize PSF
-        psf_norm = psf / torch.sum(psf, [-1, -2], keepdim=True)
+        psf_norm = psf / (torch.sum(psf, [-1, -2], keepdim=True) + 1e-12)
 
         # Compute OTF
         otf = torch.fft.fft2(psf_norm, norm="ortho")
@@ -417,7 +445,7 @@ class Network(nn.Module):
         # Loss function
         tmp = torch.sum(modulus_D, dim=1)
 
-        loss = tmp - modulus_D_star_S / (variance[:, None, None] + denominator + 1e-10)
+        loss = tmp - modulus_D_star_S / (variance[:, None, None] + denominator + 1e-8)
 
         # # This normalization is here because we use non-normalized FFTs, which
         # # lack a sqrt(Nx*Ny). It is squared because the loss function has
@@ -575,17 +603,21 @@ class MultiTelescopeStackDataset(Dataset):
 # Define an Augmentation Wrapper Class for the Training Split
 class AugmentedDatasetWrapper(torch.utils.data.Dataset):
     """
-    Applies consistent spatial augmentations across all frames in a stack.
-    
-    STRATEGY B:
-    - Applies dynamic zooming to 128x128 stacks.
-    - Upscales output tensors to 256x256 to prevent edge pixel loss/cropping.
-    - Updates 'pixel_size' in metadata to ensure exact physical alignment with the OTF.
+    Applies continuous random zooming between 1x and 2x across a frame stack
+    while keeping physical telescope metadata strictly fixed.
     """
-    def __init__(self, dataset, zoom_prob: float = 0.5, zoom_range: tuple = (1.05, 1.25)):
+    def __init__(self, dataset, zoom_range: tuple = (1.0, 2.0), zoom_prob: float = 0.5):
+        """
+        zoom_range: (min_zoom, max_zoom)
+        - 1.0 = No zoom (crop_ratio = 1.0)
+        - 2.0 = 2x zoom into center (crop_ratio = 0.5)
+        zoom_prob: Probability (0.0 to 1.0) of applying a zoom crop.
+        """
         self.dataset = dataset
         self.zoom_prob = zoom_prob
-        self.zoom_range = zoom_range
+        # Convert zoom factors to crop ratios: 1x -> 1.0, 2x -> 0.5
+        self.min_crop_ratio = 1.0 / zoom_range[1]  # 1 / 2.0 = 0.5
+        self.max_crop_ratio = 1.0 / zoom_range[0]  # 1 / 1.0 = 1.0
 
     def __len__(self):
         return len(self.dataset)
@@ -593,28 +625,33 @@ class AugmentedDatasetWrapper(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         sample = self.dataset[idx]
         images = sample["images"]  # Shape: (N_frames, H, W)
-        cfg = dict(sample["config"])  # Shallow copy to avoid mutating original dataset state
+        cfg = dict(sample["config"])  # Shallow copy
         
         N, H, W = images.shape
         
-        # 1. Rigid Spatial Transformations (Rotations & Flips)
+        # 1. Rigid Transformations (Rotations & Flips)
         angle = random.choice([0, 90, 180, 270])
         do_hflip = random.random() > 0.5
         do_vflip = random.random() > 0.5
 
-        # 2. Strategy B Trigger: Check if this stack is 128x128 and choose dynamic zoom
-        is_128 = (H == 128 and W == 128)
-        zoom_factor = 1.0
+        # 2. Determine Zoom Crop Ratio based on zoom_prob
+        if random.random() < self.zoom_prob:
+            crop_ratio = random.uniform(self.min_crop_ratio, self.max_crop_ratio)
+        else:
+            crop_ratio = 1.0  # No crop (1.0x full field-of-view)
         
-        if is_128 and (random.random() < self.zoom_prob):
-            zoom_factor = random.uniform(*self.zoom_range)  # e.g., 1.15x zoom
+        crop_h = int(H * crop_ratio)
+        crop_w = int(W * crop_ratio)
+        
+        # Center crop bounding box
+        start_h = (H - crop_h) // 2
+        start_w = (W - crop_w) // 2
 
         augmented_frames = []
         for frame in images:
-            # Reshape tensor to (1, 1, H, W) for transformation utilities
-            frame_tensor = frame.unsqueeze(0).unsqueeze(0)
+            frame_tensor = frame.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
             
-            # Apply Flips and Rotations
+            # Apply Flips & Rotations
             if angle != 0:
                 frame_tensor = TF.rotate(frame_tensor, angle)
             if do_hflip:
@@ -622,37 +659,24 @@ class AugmentedDatasetWrapper(torch.utils.data.Dataset):
             if do_vflip:
                 frame_tensor = TF.vflip(frame_tensor)
                 
-            # Apply Strategy B Zoom & Rescale to 256x256
-            if is_128:
-                if zoom_factor > 1.0:
-                    # Step A: Apply dynamic zoom by resampling to intermediate size
-                    intermediate_H = int(H * zoom_factor)
-                    intermediate_W = int(W * zoom_factor)
-                    zoomed = F.interpolate(
-                        frame_tensor, size=(intermediate_H, intermediate_W), 
-                        mode='bilinear', align_corners=False
-                    )
-                    
-                    # Step B: Rescale the zoomed FOV up to 256x256 without cropping edges
-                    frame_tensor = F.interpolate(
-                        zoomed, size=(256, 256), mode='bilinear', align_corners=False
-                    )
-                else:
-                    # Standard 2x upscaling without dynamic zoom (128x128 -> 256x256)
-                    frame_tensor = F.interpolate(
-                        frame_tensor, size=(256, 256), mode='bilinear', align_corners=False
-                    )
+            # Crop and Resample only if a zoom was selected or canvas needs resizing
+            if crop_ratio < 1.0 or (H, W) != (256, 256):
+                cropped = frame_tensor[:, :, start_h:start_h+crop_h, start_w:start_w+crop_w]
+                frame_tensor = F.interpolate(
+                    cropped, 
+                    size=(256, 256), 
+                    mode='bilinear', 
+                    align_corners=False
+                )
 
             augmented_frames.append(frame_tensor.squeeze())
 
-        # Stack back to (N_frames, H_out, W_out)
+        # Stack back to (N_frames, 256, 256)
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # 3. CRITICAL PHYSICS UPDATE: Recalculate effective pixel size
-        if is_128:
-            total_scale_factor = 2.0 * zoom_factor  # 2.0x from grid expansion * dynamic zoom
-            cfg["pixel_size"] = cfg["pixel_size"] / total_scale_factor
-            cfg["target_dim"] = 256
+        # 3. METADATA: Output grid is strictly 256x256, pixel_size stays untouched
+        cfg["target_dim"] = 256
+        # cfg["pixel_size"] is NEVER modified, keeping KL modes locked in cache!
 
         sample["config"] = cfg
         return sample
@@ -716,8 +740,7 @@ if __name__ == "__main__":
     # Wrap ONLY the training dataset with Strategy B dynamic zooming
     train_dataset_augmented = AugmentedDatasetWrapper(
         train_dataset, 
-        zoom_prob=0.5,           # 50% chance of dynamic zooming
-        zoom_range=(1.05, 1.25)  # 5% - 25% zoom range
+        zoom_range=(1.0, 2.0)  # 0% - 100% zoom range
     )
 
     # Individual DataLoaders (batch_size=1)
@@ -730,7 +753,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------
     model = Network(device=device, n_modes=44, basis_for_wavefront='kl').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss_scale = 1e3
+    loss_scale = 1
     
     # QUICK TEST CONFIGURATION: 5 Epochs & Low Patience
     num_epochs = 5            # Reduced for fast verification run
