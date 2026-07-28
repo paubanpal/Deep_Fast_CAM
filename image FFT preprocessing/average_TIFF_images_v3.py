@@ -9,40 +9,25 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# --- Define the Averaging Function ---
-def process_tiff_stack_average(file_path):
-    """Loads a 3D TIFF stack, averages it, and saves both 2D TIFF and PNG with a colorbar."""
-    # Read the 3D stack
-    stack = tiff.imread(file_path, out='memmap')
-    
-    # Calculate the average across axis 0
-    averaged_image = np.mean(stack, axis=0).astype(np.float32)
-    
-    # Modify file_path to append "_col_scale_average" to the name
-    base_name = f"{file_path.stem}_col_scale_average"
-    tiff_path = file_path.with_name(f"{base_name}{file_path.suffix}")
-    png_path = file_path.with_name(f"{base_name}.png")
-    
-    # 1. Save the 2D TIFF image
-    tiff.imwrite(tiff_path, averaged_image)
-    
-    # --- 2. SAVE PNG WITH COLOUR SCALE ---
+
+def save_png_with_colorbar(target_path, array_data, cmap_name='gray'):
+    """Helper function to save a 2D array as a PNG with a grayscale colorbar."""
     fig, ax = plt.subplots(figsize=(7, 6), dpi=150)
     
-    vmin, vmax = averaged_image.min(), averaged_image.max()
+    vmin, vmax = array_data.min(), array_data.max()
     if vmin == vmax:
         vmax += 1
 
-    im = ax.imshow(averaged_image, cmap='viridis', vmin=vmin, vmax=vmax, origin='lower')
+    im = ax.imshow(array_data, cmap=cmap_name, vmin=vmin, vmax=vmax, origin='lower')
     
-    # Add color scale legend (colorbar)
+    # Add grayscale colorbar legend
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=8)
     
-    ax.axis('off')  # Hide tick marks/border
+    ax.axis('off')  # Hide axes ticks and borders
     fig.tight_layout()
 
-    # Safe write via temporary local transit to prevent network issues
+    # Safe write using temporary local file to prevent network issues
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         temp_name = tmp.name
 
@@ -50,13 +35,43 @@ def process_tiff_stack_average(file_path):
         fig.savefig(temp_name, bbox_inches='tight')
         plt.close(fig)  # Release RAM
         
-        png_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(temp_name, str(png_path))
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(temp_name, str(target_path))
     except Exception as e:
         plt.close(fig)
         if Path(temp_name).exists():
             Path(temp_name).unlink()
         raise e
+
+
+# --- Define the Averaging Function ---
+def process_tiff_stack_average(file_path):
+    """Loads a 3D TIFF stack, averages it, saves the TIFF, and exports 
+
+    grayscale PNGs with colorbars for both the first slice and the average."""
+    # Read the 3D stack
+    stack = tiff.imread(file_path, out='memmap')
+    
+    # Handle single 2D images vs 3D stacks safely
+    if stack.ndim == 3:
+        first_slice = stack[0].astype(np.float32)
+        averaged_image = np.mean(stack, axis=0).astype(np.float32)
+    else:
+        first_slice = stack.astype(np.float32)
+        averaged_image = stack.astype(np.float32)
+    
+    # 1. Save the averaged 2D TIFF image
+    new_filename = f"{file_path.stem}_average{file_path.suffix}"
+    tiff_path = file_path.with_name(new_filename)
+    tiff.imwrite(tiff_path, averaged_image)
+
+    # 2. Save PNG with grayscale colorbar for the AVERAGED image
+    png_avg_path = file_path.with_name(f"{file_path.stem}_col_scale_average.png")
+    save_png_with_colorbar(png_avg_path, averaged_image, cmap_name='gray')
+
+    # 3. Save PNG with grayscale colorbar for the FIRST SLICE of the stack
+    png_first_slice_path = file_path.with_name(f"{file_path.stem}_col_scale_slice0.png")
+    save_png_with_colorbar(png_first_slice_path, first_slice, cmap_name='gray')
 
 
 # --- Setup Paths (Using raw strings 'r') ---
