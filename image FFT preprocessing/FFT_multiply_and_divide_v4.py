@@ -74,18 +74,18 @@ def safe_tiff_read(file_path):
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
         
-    # Si ya está en local o pesa muy poco, lo leemos normal
-    # Pero si está en red, creamos un puente temporal en local C:
+    # If it is already local or small, we could read it normally.
+    # But if it is on a network drive, we create a temporary local bridge on the C: drive.
     with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
         temp_name = tmp.name
         
     try:
-        # Copia rápida por bloques del archivo entero de la red a local C:
+        # Fast block copy of the entire file from network to local C: drive
         shutil.copy2(str(file_path), temp_name)
-        # Lectura ultra rápida desde el almacenamiento local
+        # Ultra-fast read directly from local storage
         data = tiff.imread(temp_name)
     finally:
-        # Nos aseguramos al 100% de liberar el espacio en C: pase lo que pase
+        # Ensure 100% that local C: temporary space is freed up regardless of errors
         if Path(temp_name).exists():
             Path(temp_name).unlink()
             
@@ -171,7 +171,7 @@ def calculations_complex_ops(pairs, input_folder, output_folder):
         print(f"Processing Matrix Operations for: {pair['base_name']}")
         
         try:
-            # Ahora leemos pasando por el "puente" local rápido
+            # Reading via the fast local bridge
             std_r = safe_tiff_read(input_folder / pair['std_real']).astype(np.float32)
             std_i = safe_tiff_read(input_folder / pair['std_imag']).astype(np.float32)
             avg_r = safe_tiff_read(input_folder / pair['avg_real']).astype(np.float32)
@@ -183,22 +183,22 @@ def calculations_complex_ops(pairs, input_folder, output_folder):
         complex_std = std_r + 1j * std_i
         complex_avg = avg_r + 1j * avg_i
 
-        # --- 1. MULTIPLICACIÓN COMPLEJA ---
-        complex_mult = complex_std * complex_avg
+        # --- 1. COMPLEX MULTIPLICATION (using complex conjugate of average) ---
+        complex_mult = complex_std * np.conj(complex_avg)
         
-        # --- 2. DIVISIÓN COMPLEJA CON REGULARIZACIÓN ---
+        # --- 2. COMPLEX DIVISION WITH REGULARIZATION ---
         avg_magnitude = np.abs(complex_avg)
         complex_avg_safe = np.copy(complex_avg)
         complex_avg_safe[avg_magnitude < epsilon] = epsilon
         
         complex_div = complex_std / complex_avg_safe
 
-        # Comprobación de dimensiones (3D vs 2D) para la imagen PNG
+        # Dimensionality check (3D vs 2D) for PNG image generation
         is_3d = complex_std.ndim == 3
         slice_idx = 0 if is_3d else ...
         base_stem = pair['base_name']
 
-        # --- 3. COMPONENTES DE MULTIPLICACIÓN ---
+        # --- 3. MULTIPLICATION COMPONENTS ---
         mult_components = {
             "real": np.real(complex_mult),
             "imaginary": np.imag(complex_mult),
@@ -209,14 +209,14 @@ def calculations_complex_ops(pairs, input_folder, output_folder):
             tif_target = output_folder / f"{base_stem}_FFT_mult_col_scale_{name}.tif"
             png_target = output_folder / f"{base_stem}_FFT_mult_col_scale_{name}_slice0.png"
             
-            # Se guarda el TIFF entero (mantiene las 3 dimensiones)
+            # Save the full TIFF (preserves 3D volume structure)
             safe_tiff_write(tif_target, data)
             
-            # El PNG extrae solo la primera rebanada (slice 0) si es 3D
+            # Save PNG extracting only the first slice (slice 0) if data is 3D
             cmap = 'bwr' if name in ['real', 'imaginary'] else ('twilight' if name == 'phase' else 'viridis')
             safe_png_write(png_target, data[slice_idx], cmap_name=cmap)
 
-        # --- 4. COMPONENTES DE DIVISIÓN ---
+        # --- 4. DIVISION COMPONENTS ---
         div_components = {
             "real": np.real(complex_div),
             "imaginary": np.imag(complex_div),
@@ -227,10 +227,10 @@ def calculations_complex_ops(pairs, input_folder, output_folder):
             tif_target = output_folder / f"{base_stem}_FFT_div_col_scale_{name}.tif"
             png_target = output_folder / f"{base_stem}_FFT_div_col_scale_{name}_slice0.png"
             
-            # Se guarda el TIFF entero (mantiene las 3 dimensiones)
+            # Save the full TIFF (preserves 3D volume structure)
             safe_tiff_write(tif_target, data)
             
-            # El PNG extrae solo la primera rebanada (slice 0) si es 3D
+            # Save PNG extracting only the first slice (slice 0) if data is 3D
             cmap = 'bwr' if name in ['real', 'imaginary'] else ('twilight' if name == 'phase' else 'viridis')
             safe_png_write(png_target, data[slice_idx], cmap_name=cmap)
 
