@@ -318,7 +318,11 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
-        loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
+        #loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
+        # Extract real components and safely clamp the real denominator
+        denom_real = (variance[:, None, None] + denominator).real
+        denom_safe = torch.clamp(denom_real, min=1e-8)
+        loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
         if lengths is not None:
             total_valid_frames = torch.sum(lengths_dev)
