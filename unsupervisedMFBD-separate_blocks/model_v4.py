@@ -513,7 +513,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_scale = 1e3
     
-    patience = 15
+    patience = 100
     patience_counter = 0
     best_val_loss = float('inf')
     num_epochs = 5000
