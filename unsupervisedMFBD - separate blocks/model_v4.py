@@ -185,32 +185,35 @@ class Network(nn.Module):
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
             
-        if (self.basis_for_wavefront == 'zernike'):
-            print("Computing Zernike modes...")
-            Z_machine = zern.ZernikeNaive(mask=[])
-            x = np.linspace(-1, 1, self.npix_image)
-            xx, yy = np.meshgrid(x, x)
-            rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
-            theta = np.arctan2(yy, xx)
-            aperture_mask = rho <= 1.0
+        # if (self.basis_for_wavefront == 'zernike'):
+        #     print("Computing Zernike modes...")
+        #     Z_machine = zern.ZernikeNaive(mask=[])
+        #     x = np.linspace(-1, 1, self.npix_image)
+        #     xx, yy = np.meshgrid(x, x)
+        #     rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
+        #     theta = np.arctan2(yy, xx)
+        #     aperture_mask = rho <= 1.0
 
-            basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
+        #     basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
             
-            for j in range(self.n_modes):
-                n, m = zern.zernIndex(j+2)
-                Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
-                basis[j,:,:] = Z * aperture_mask
+        #     for j in range(self.n_modes):
+        #         n, m = zern.zernIndex(j+2)
+        #         Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
+        #         basis[j,:,:] = Z * aperture_mask
 
-        if (self.basis_for_wavefront == 'kl'):
-            print("Computing KL modes...")
-            kl = kl_modes.KL()
-            basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
+        # if (self.basis_for_wavefront == 'kl'):
+        #     print("Computing KL modes...")
+        #     kl = kl_modes.KL()
+        #     basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
 
-        zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
+        # zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
 
-        self.register_buffer('zeros', zeros)
-        self.register_buffer('pupil', pupil)
-        self.register_buffer('basis', torch.tensor(basis.astype('float32')))
+        # self.register_buffer('zeros', zeros)
+        # self.register_buffer('pupil', pupil)
+        # self.register_buffer('basis', torch.tensor(basis.astype('float32')))
+
+        # Leave buffer initialization deferred to update_telescope_basis()
+        self.basis_cache = {}
 
         self.cnn = CNN(n=16, n_lstm=256)
         self.cnn.weights_init()
@@ -219,25 +222,42 @@ class Network(nn.Module):
         self.lstm.weights_init()
 
     def update_telescope_basis(self, pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image):
-        new_config = (pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image)
-        if self.current_config == new_config:
-            return
-        
+        # Initialize cache on the module if it doesn't exist yet
+        if not hasattr(self, 'basis_cache'):
+            self.basis_cache = {}
+
+        # Round floating point values slightly to prevent tiny float rounding errors from missing the cache
+        pixel_size_key = round(float(pixel_size), 6)
+    
+        config_key = (pixel_size_key, telescope_diameter, central_obscuration, wavelength, int(npix_image))
+    
+        if getattr(self, 'current_config', None) == config_key:
+            return  # Already configured for this exact state on the current step
+
         self.pixel_size = pixel_size
         self.telescope_diameter = telescope_diameter
         self.central_obscuration = central_obscuration
         self.wavelength = wavelength
-        self.npix_image = npix_image
-        self.current_config = new_config
+        self.npix_image = int(npix_image)
+        self.current_config = config_key
 
-        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
-        if (self.overfill < 1.0):
+        # Check if we already computed and cached this exact configuration earlier
+        if config_key in self.basis_cache:
+            cached_pupil, cached_basis, cached_zeros = self.basis_cache[config_key]
+            self.register_buffer('pupil', cached_pupil.to(self.device), persistent=False)
+            self.register_buffer('basis', cached_basis.to(self.device), persistent=False)
+            self.register_buffer('zeros', cached_zeros.to(self.device), persistent=False)
+            return
+
+        # --- Compute from scratch only if NOT in cache ---
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                 
+        if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
-            
+        
         pupil = util.aperture(npix=self.npix_image, cent_obs=self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'), device=self.device)
-            
-        if (self.basis_for_wavefront == 'zernike'):
+        
+        if self.basis_for_wavefront == 'zernike':
             Z_machine = zern.ZernikeNaive(mask=[])
             x = np.linspace(-1, 1, self.npix_image)
             xx, yy = np.meshgrid(x, x)
@@ -251,15 +271,20 @@ class Network(nn.Module):
                 Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
                 basis[j,:,:] = Z * aperture_mask
 
-        elif (self.basis_for_wavefront == 'kl'):
+        elif self.basis_for_wavefront == 'kl':
             kl = kl_modes.KL()
             basis = kl.precalculate_covariance(npix_image=self.npix_image, n_modes_max=self.n_modes, first_noll=1, overfill=self.overfill)
 
         zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32, device=self.device)
+        basis_tensor = torch.tensor(basis.astype('float32'), device=self.device)
 
+        # Store tensors in dictionary cache
+        self.basis_cache[config_key] = (pupil, basis_tensor, zeros)
+
+        # Register as active PyTorch buffers
         self.register_buffer('zeros', zeros, persistent=False)
         self.register_buffer('pupil', pupil, persistent=False)
-        self.register_buffer('basis', torch.tensor(basis.astype('float32'), device=self.device), persistent=False)
+        self.register_buffer('basis', basis_tensor, persistent=False)
 
     def compute_psfs(self, coeff):
         wavefront = torch.einsum('ij,jkl->ikl', coeff, self.basis)
@@ -267,7 +292,8 @@ class Network(nn.Module):
 
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
-        psf_norm = psf / torch.sum(psf, [-1, -2], keepdim=True)
+        psf_sum = torch.clamp(torch.sum(psf, [-1, -2], keepdim=True), min=1e-8)
+        psf_norm = psf / psf_sum
         otf = torch.fft.fft2(psf_norm, norm="ortho")
 
         return psf, otf, wavefront
@@ -292,7 +318,7 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
-        loss = tmp - modulus_D_star_S / (variance[:, None, None] + denominator + 1e-10)
+        loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
 
         if lengths is not None:
             total_valid_frames = torch.sum(lengths_dev)
@@ -524,7 +550,7 @@ if __name__ == "__main__":
         
         seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
         seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
-        images_norm = images / (seq_mean_flux + 1e-10)
+        images_norm = images / torch.clamp(seq_mean_flux, min=1e-8)
         
         images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
         variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
@@ -560,7 +586,7 @@ if __name__ == "__main__":
             
             val_seq_sum = torch.sum(val_images, dim=(-2, -1), keepdim=True)
             val_seq_mean_flux = torch.sum(val_seq_sum, dim=1, keepdim=True) / val_images.shape[1]
-            val_images_norm = val_images / (val_seq_mean_flux + 1e-10)
+            val_images_norm = val_images / torch.clamp(val_seq_mean_flux, min=1e-8)
             
             val_images_ft = torch.fft.fft2(val_images_norm, dim=(-2, -1), norm="ortho")
 

@@ -1,0 +1,11 @@
+{
+    "train_loss": [
+        NaN,
+        NaN
+    ],
+    "val_loss": [
+        NaN,
+        NaN
+    ],
+    "best_val_loss": Infinity
+}
