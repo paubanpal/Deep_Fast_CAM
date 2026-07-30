@@ -513,10 +513,10 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_scale = 1e3
     
-    patience = 100
+    patience = 50
     patience_counter = 0
     best_val_loss = float('inf')
-    num_epochs = 5000
+    num_epochs = 100
     
     save_dir = Path("/scratch/paulabp/TFM/run_outputs")
     save_dir.mkdir(parents=True, exist_ok=True)
