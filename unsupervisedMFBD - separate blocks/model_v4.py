@@ -501,7 +501,7 @@ class AugmentedDatasetWrapper:
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    data_path = Path("I:/Departamentos/Óptica/paulabp/master/TFM/images_networks/originals_cropped")
+    data_path = Path("/scratch/paulabp/TFM/images/images_for_network")
     dataset = DynamicStackDataset(root_dir=data_path)
     augmentor = AugmentedDatasetWrapper(zoom_prob=0.5, zoom_range=(1.05, 1.25))
 
@@ -516,7 +516,7 @@ if __name__ == "__main__":
     patience = 15
     patience_counter = 0
     best_val_loss = float('inf')
-    num_epochs = 1000
+    num_epochs = 5000
     
     save_dir = Path("./run_outputs")
     save_dir.mkdir(parents=True, exist_ok=True)
