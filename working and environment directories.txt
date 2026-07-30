@@ -12,6 +12,16 @@ export PATH="/home/paulabp/miniconda3/envs/tfm_conda_venv/bin:$PATH"
 
 activartfm
 
+For HPC's .job:
+# 1. Clean environment
+module purge 2>/dev/null
+
+# 2. Source Conda from your scratch directory
+source /scratch/paulabp/miniconda3/etc/profile.d/conda.sh
+
+# 3. Activate your environment
+conda activate tfm_conda_venv
+
 To save a new requirements file from the HPC:
 conda env export --no-builds > environment.yml
 

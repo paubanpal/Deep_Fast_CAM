@@ -859,4 +859,4 @@ if __name__ == "__main__":
     plt.savefig(save_dir / "loss_plot.png", dpi=300)
     plt.close()
     
-    print(f"✅ Training completed. Outputs saved to {save_dir.resolve()}")
+    print(f"Training completed. Outputs saved to {save_dir.resolve()}")
