@@ -158,7 +158,7 @@ class LSTM(nn.Module):
 
 class Network(nn.Module):
     def __init__(self, device='cpu', n_modes=44, n_frames=50, pixel_size=0.042, 
-                 telescope_diameter=150.0, central_obscuration=0.0, wavelength=8000.0, basis_for_wavefront='zernike', npix_image=128):
+                  telescope_diameter=150.0, central_obscuration=0.0, wavelength=8000.0, basis_for_wavefront='zernike', npix_image=128):
         
         super().__init__()
 
@@ -518,7 +518,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     num_epochs = 5000
     
-    save_dir = Path("./run_outputs")
+    save_dir = Path("/scratch/paulabp/TFM/run_outputs")
     save_dir.mkdir(parents=True, exist_ok=True)
     best_model_path = save_dir / "best_model.pt"
 
