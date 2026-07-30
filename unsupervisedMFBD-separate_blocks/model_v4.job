@@ -19,6 +19,6 @@ source /scratch/paulabp/miniconda3/etc/profile.d/conda.sh
 # Activate your environment
 conda activate tfm_conda_venv
 
-cd "/scratch/paulabp/TFM/repository/Deep_Fast_CAM/unsupervisedMFBD - separate blocks"
+cd "/scratch/paulabp/TFM/repository/Deep_Fast_CAM/unsupervisedMFBD-separate_blocks"
 
 srun python model_v4.py 
