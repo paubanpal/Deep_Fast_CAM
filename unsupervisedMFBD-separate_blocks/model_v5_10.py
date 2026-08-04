@@ -554,8 +554,8 @@ if __name__ == "__main__":
     # -------------------------------------------------------------
     n_frames_per_epoch = 10
     model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    loss_scale = 1.0
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_scale = 1e3
     
     patience = 50
     patience_counter = 0

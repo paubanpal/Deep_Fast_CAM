@@ -27,3 +27,20 @@ conda env export --no-builds > environment.yml
 
 To select GPU in sbatch in burros:
 #SBATCH --gres=gpu:1
+
+
+
+
+
+
+
+
+en vena:
+
+To activate this environment, use
+#
+#     $ conda activate /scratch/paulabp/envs/tfm_env
+#
+# To deactivate an active environment, use
+#
+#     $ conda deactivate
