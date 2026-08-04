@@ -552,7 +552,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------
     # Model, Optimizer & Early Stopping Setup
     # -------------------------------------------------------------
-    n_frames_per_epoch = 90
+    n_frames_per_epoch = 50
     model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_scale = 1e3
@@ -560,9 +560,9 @@ if __name__ == "__main__":
     patience = 50
     patience_counter = 0
     best_val_loss = float('inf')
-    num_epochs = 100
+    num_epochs = 1000
     
-    save_dir = Path("/scratch/paulabp/TFM/run_outputs_v5_90")
+    save_dir = Path("/scratch/paulabp/TFM/run_outputs_v5_2")
     save_dir.mkdir(parents=True, exist_ok=True)
     best_model_path = save_dir / "best_model.pt"
 
