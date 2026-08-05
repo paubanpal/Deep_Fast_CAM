@@ -144,7 +144,7 @@ class LSTM(nn.Module):
     def forward(self, latent_features, lengths=None):
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                latent_features, lengths.to(torch.int64).cpu(), batch_first=True, enforce_sorted=False
+                latent_features, lengths.to(torch.int64), batch_first=True, enforce_sorted=False
             )
             packed_out, _ = self.lstm(packed)
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
@@ -483,7 +483,7 @@ class AugmentedDatasetWrapper:
     """
     Applies consistent spatial augmentations across all frames in a sampled sequence.
     """
-    def __init__(self, zoom_prob: float = 0.5, zoom_range: tuple = (1.05, 1.25)):
+    def __init__(self, zoom_prob: float = 0.0, zoom_range: tuple = (1.05, 1.25)):
         self.zoom_prob = zoom_prob
         self.zoom_range = zoom_range
 
