@@ -563,7 +563,7 @@ if __name__ == "__main__":
     n_frames_per_epoch = 50
     model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    num_epochs = 100
+    num_epochs = 1000
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
     loss_scale = 1.0
     
