@@ -144,7 +144,7 @@ class LSTM(nn.Module):
     def forward(self, latent_features, lengths=None):
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                latent_features, lengths.to(torch.int64).cpu(), batch_first=True, enforce_sorted=False
+                latent_features, lengths.to(torch.int64), batch_first=True, enforce_sorted=False
             )
             packed_out, _ = self.lstm(packed)
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
