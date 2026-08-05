@@ -21,4 +21,4 @@ conda activate tfm_conda_venv
 
 cd "/scratch/paulabp/TFM/repository/Deep_Fast_CAM/unsupervisedMFBD-separate_blocks"
 
-srun python -u comprobacion.py 
+srun python -u comprobacion_10.py 
