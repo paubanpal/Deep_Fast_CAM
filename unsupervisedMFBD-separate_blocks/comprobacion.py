@@ -146,7 +146,7 @@ class LSTM(nn.Module):
     def forward(self, latent_features, lengths=None):
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                latent_features, lengths.to(torch.int64).cpu(), batch_first=True, enforce_sorted=False
+                latent_features, lengths.to(dtype=torch.int64, device='cpu'), batch_first=True, enforce_sorted=False
             )
             packed_out, _ = self.lstm(packed)
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
@@ -544,9 +544,6 @@ class AugmentedDatasetWrapper:
         sample["config"] = cfg
         return sample
 
-# Importa las clases de tu script principal (o asegúrate de que están en el mismo archivo/directorio)
-# from main import Network, DynamicStackDataset
-
 def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     
@@ -558,7 +555,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     val_sample_info = dataset.val_samples[0]
     
     val_sample = dataset.sample_slice(val_sample_info, n_frames=50, start_idx=0)
-    images = val_sample["images"].unsqueeze(0).to(device)  # [1, 50, H, W]
+    images = val_sample["images"].unsqueeze(0).to(device)  # Forma estricta: [1, 50, H, W]
     cfg = val_sample["config"]
     H, W = images.shape[-2], images.shape[-1]
 
@@ -593,7 +590,8 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     object_ft = num / (den.real + variance[:, None, None] + eps)
     object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
 
-    degraded_mean = images.squeeze().mean(dim=0).cpu().numpy()
+    # Promedio directo en el eje temporal para garantizar matriz 2D (H, W)
+    degraded_mean = images[0].mean(dim=0).cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     axes[0].imshow(degraded_mean, cmap='gray')
