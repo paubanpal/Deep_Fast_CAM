@@ -552,7 +552,8 @@ if __name__ == "__main__":
     # -------------------------------------------------------------
     # Configuración de Acumulación de Gradientes
     # -------------------------------------------------------------
-    accumulation_steps = 4  # Cambiar a 8 (o a len(dataset.train_samples) para toda la época)
+    num_train_samples = len(dataset.train_samples) # 10
+    accumulation_steps = num_train_samples
 
     # -------------------------------------------------------------
     # Model, Optimizer & Early Stopping Setup
