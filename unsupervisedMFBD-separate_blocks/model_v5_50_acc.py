@@ -567,7 +567,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     num_epochs = 100
     
-    save_dir = Path("/scratch/paulabp/TFM/run_outputs_v5_10_acc")
+    save_dir = Path("/scratch/paulabp/TFM/run_outputs_v5_50_acc")
     save_dir.mkdir(parents=True, exist_ok=True)
     best_model_path = save_dir / "best_model.pt"
 
