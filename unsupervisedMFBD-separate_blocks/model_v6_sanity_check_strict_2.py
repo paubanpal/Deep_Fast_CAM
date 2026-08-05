@@ -547,14 +547,18 @@ if __name__ == "__main__":
     
     data_path = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
     dataset = DynamicStackDataset(root_dir=data_path, seed=42)
-    
-    augmentor = AugmentedDatasetWrapper(zoom_prob=0.0, zoom_range=(1.05, 1.25))
 
     accumulation_steps = 1
     
+    # -------------------------------------------------------------
+    # Muestra idéntica para Train y Val en Sanity Check
+    # -------------------------------------------------------------
     single_train_sample = [dataset.train_samples[0]]
-    single_val_sample = single_train_sample
+    single_val_sample = single_train_sample  # Mismo stack para validar memorización
 
+    # -------------------------------------------------------------
+    # Setup de Modelo y Optimizador
+    # -------------------------------------------------------------
     n_frames_per_epoch = 50
     model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
     
@@ -574,18 +578,22 @@ if __name__ == "__main__":
     train_loss_history = []
     val_loss_history = []
 
+    # -------------------------------------------------------------
+    # Epoch Loop: Single Stack Overfitting Test (Sin Augmentor)
+    # -------------------------------------------------------------
     for epoch in range(1, num_epochs + 1):
         # --- TRAINING PHASE ---
         model.train()
         train_epoch_losses = []
+        
         optimizer.zero_grad()
 
         for step, sample_info in enumerate(single_train_sample, start=1):
+            # Carga directa del slice limpio sin pasar por augmentor
             sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=0)
-            augmented_sample = augmentor.augment(sample)
             
-            images = augmented_sample["images"].unsqueeze(0).to(device)
-            cfg = augmented_sample["config"]
+            images = sample["images"].unsqueeze(0).to(device)  # Shape: [1, 50, H, W]
+            cfg = sample["config"]
             H, W = images.shape[-2], images.shape[-1]
 
             model.update_telescope_basis(
@@ -621,16 +629,15 @@ if __name__ == "__main__":
 
         scheduler.step()
 
-        # --- VALIDATION PHASE (Procesamiento idéntico al bloque de Train) ---
+        # --- VALIDATION PHASE (Carga directa idéntica a Train) ---
         model.eval()
         val_epoch_losses = []
         with torch.no_grad():
             for sample_info in single_val_sample:
                 val_sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=0)
-                val_augmented = augmentor.augment(val_sample)  # Aplicar mismo wrapper
                 
-                val_images = val_augmented["images"].unsqueeze(0).to(device)
-                val_cfg = val_augmented["config"]
+                val_images = val_sample["images"].unsqueeze(0).to(device)
+                val_cfg = val_sample["config"]
                 val_H = val_images.shape[-2]
 
                 model.update_telescope_basis(
@@ -687,7 +694,7 @@ if __name__ == "__main__":
     plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
     plt.xlabel("Epoch")
     plt.ylabel("MOMFBD Loss")
-    plt.title("Sanity Check: Single Stack Overfitting (Same Sample)")
+    plt.title("Sanity Check: Single Stack Overfitting (Same Sample, No Augmentations)")
     plt.grid(True, which="both", linestyle="--", alpha=0.5)
     plt.legend()
     plt.tight_layout()
