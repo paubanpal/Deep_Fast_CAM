@@ -547,26 +547,27 @@ class AugmentedDatasetWrapper:
 # Importa las clases de tu script principal (o asegúrate de que están en el mismo archivo/directorio)
 # from main import Network, DynamicStackDataset
 
-def evaluate_reconstruction_and_modes(model_path, data_path, device='cuda'):
+def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. Cargar Dataset de Validación
     dataset = DynamicStackDataset(root_dir=data_path, seed=42)
-    val_sample_info = dataset.val_samples[0]  # Seleccionamos el primer stack de validación
+    val_sample_info = dataset.val_samples[0]
     
-    # Extraer los 50 frames deterministas
     val_sample = dataset.sample_slice(val_sample_info, n_frames=50, start_idx=0)
     images = val_sample["images"].unsqueeze(0).to(device)  # [1, 50, H, W]
     cfg = val_sample["config"]
     H, W = images.shape[-2], images.shape[-1]
 
-    # 2. Inicializar Cargar Modelo Entrenado
+    # 2. Inicializar y Cargar Modelo Entrenado
     model = Network(device=device, n_modes=119, n_frames=50, basis_for_wavefront='kl').to(device)
     checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    # Configurar bases ópticas
     model.update_telescope_basis(
         pixel_size=cfg["pixel_size"],
         telescope_diameter=cfg["telescope_diameter"],
@@ -587,34 +588,33 @@ def evaluate_reconstruction_and_modes(model_path, data_path, device='cuda'):
     with torch.no_grad():
         coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance, lengths=lengths)
 
-    # --- TAREA 1: Inspección Visual del Objeto Reconstruido (O) ---
-    # Objeto restaurado mediante el Filtro de Wiener en el dominio espectral: O = Num / (Den + eps)
+    # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) ---
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
 
-    # Media simple de los fotogramas de entrada (sin corrección de turbulencia)
     degraded_mean = images.squeeze().mean(dim=0).cpu().numpy()
 
-    # Graficar la comparación
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     axes[0].imshow(degraded_mean, cmap='gray')
     axes[0].set_title("Media Simple (Entrada Degradada)")
     axes[0].axis('off')
 
-    im = axes[1].imshow(object_reconstructed, cmap='gray')
-    axes[1].set_title("Objeto Reconstruido (Filtro de Wiener)")
+    axes[1].imshow(object_reconstructed, cmap='gray')
+    axes[1].set_title("Objeto Reconstruido (Wiener)")
     axes[1].axis('off')
 
-    plt.suptitle(f"Reconstrucción del Objeto - Stack: {val_sample_info['path'].name}", fontsize=14)
+    plt.suptitle(f"Reconstrucción - Stack: {val_sample_info['path'].name}", fontsize=14)
     plt.tight_layout()
-    plt.savefig("inspection_reconstructed_object.png", dpi=300)
-    plt.show()
+    
+    obj_plot_path = save_dir / "inspection_reconstructed_object.png"
+    plt.savefig(obj_plot_path, dpi=300)
+    plt.close()
+    print(f"--> Gráfica del objeto guardada en: {obj_plot_path}")
 
-    # --- TAREA 2: Inspección de los Modos KL ---
-    # Coeficientes predichos: shape [50, 119]
-    coeff_np = coeff.squeeze().cpu().numpy()  # Coeficientes corregidos por frame
-    mean_abs_coeff = np.mean(np.abs(coeff_np), axis=0)  # Valor absoluto medio por modo
+    # --- TAREA 2: Espectro de los Modos KL ---
+    coeff_np = coeff.squeeze().cpu().numpy()
+    mean_abs_coeff = np.mean(np.abs(coeff_np), axis=0)
     std_coeff = np.std(coeff_np, axis=0)
 
     mode_indices = np.arange(1, 120)
@@ -623,18 +623,22 @@ def evaluate_reconstruction_and_modes(model_path, data_path, device='cuda'):
     plt.plot(mode_indices, mean_abs_coeff, marker='o', markersize=3, color='crimson', label=r'Amplitud Media $|\alpha_k|$')
     plt.fill_between(mode_indices, mean_abs_coeff - std_coeff, mean_abs_coeff + std_coeff, color='crimson', alpha=0.2, label=r'Desviación ($\sigma$)')
     
-    plt.yscale('log')  # Escala logarítmica para apreciar la caída
+    plt.yscale('log')
     plt.xlabel("Índice del Modo KL")
     plt.ylabel("Amplitud del Coeficiente (rad)")
-    plt.title("Espectro de Amplitud de los Modos Karhunen-Loève (KL)")
+    plt.title("Espectro de Amplitud de los Modos KL")
     plt.grid(True, which="both", linestyle="--", alpha=0.6)
     plt.legend()
     plt.tight_layout()
-    plt.savefig("inspection_kl_modes_decay.png", dpi=300)
-    plt.show()
+    
+    kl_plot_path = save_dir / "inspection_kl_modes_decay.png"
+    plt.savefig(kl_plot_path, dpi=300)
+    plt.close()
+    print(f"--> Gráfica de modos KL guardada en: {kl_plot_path}")
 
 if __name__ == "__main__":
     model_ckpt = "/scratch/paulabp/TFM/run_outputs_v5_50_acc_sched/best_model.pt"
     data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
+    output_dir = "/scratch/paulabp/TFM/run_outputs_comprobacion/plots"
     
-    evaluate_reconstruction_and_modes(model_ckpt, data_dir)
+    evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
