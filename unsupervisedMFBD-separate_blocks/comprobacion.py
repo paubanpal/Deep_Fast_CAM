@@ -546,25 +546,34 @@ class AugmentedDatasetWrapper:
 
 def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    print(f"[INFO] Usando dispositivo: {device}")
     
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. Cargar Dataset de Validación
+    print("[INFO] Cargando dataset de validación...")
     dataset = DynamicStackDataset(root_dir=data_path, seed=42)
     val_sample_info = dataset.val_samples[0]
+    print(f"[INFO] Stack seleccionado: {val_sample_info['path'].name}")
     
     val_sample = dataset.sample_slice(val_sample_info, n_frames=50, start_idx=0)
-    images = val_sample["images"].unsqueeze(0).to(device)  # Forma estricta: [1, 50, H, W]
+    images = val_sample["images"].unsqueeze(0).to(device)  # [1, 50, H, W]
     cfg = val_sample["config"]
     H, W = images.shape[-2], images.shape[-1]
 
     # 2. Inicializar y Cargar Modelo Entrenado
+    print("[INFO] Cargando modelo y pesos...")
     model = Network(device=device, n_modes=119, n_frames=50, basis_for_wavefront='kl').to(device)
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
 
+    print("[INFO] Actualizando bases del telescopio...")
     model.update_telescope_basis(
         pixel_size=cfg["pixel_size"],
         telescope_diameter=cfg["telescope_diameter"],
@@ -574,6 +583,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     )
 
     # 3. Preprocesamiento e Inferencia
+    print("[INFO] Ejecutando inferencia...")
     seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
     seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
     images_norm = images / (seq_mean_flux + 1e-8)
@@ -586,11 +596,12 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
         coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance, lengths=lengths)
 
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) ---
+    print("[INFO] Generando gráfica del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
 
-    # Promedio directo en el eje temporal para garantizar matriz 2D (H, W)
+    # Promedio en el eje temporal asegurando matriz 2D (H, W)
     degraded_mean = images[0].mean(dim=0).cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
@@ -608,9 +619,10 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     obj_plot_path = save_dir / "inspection_reconstructed_object.png"
     plt.savefig(obj_plot_path, dpi=300)
     plt.close()
-    print(f"--> Gráfica del objeto guardada en: {obj_plot_path}")
+    print(f"--> Gráfica del objeto guardada exitosamente en: {obj_plot_path}")
 
     # --- TAREA 2: Espectro de los Modos KL ---
+    print("[INFO] Generando gráfica de decaimiento KL...")
     coeff_np = coeff.squeeze().cpu().numpy()
     mean_abs_coeff = np.mean(np.abs(coeff_np), axis=0)
     std_coeff = np.std(coeff_np, axis=0)
@@ -632,11 +644,17 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     kl_plot_path = save_dir / "inspection_kl_modes_decay.png"
     plt.savefig(kl_plot_path, dpi=300)
     plt.close()
-    print(f"--> Gráfica de modos KL guardada en: {kl_plot_path}")
+    print(f"--> Gráfica de modos KL guardada exitosamente en: {kl_plot_path}")
 
 if __name__ == "__main__":
-    model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm/best_model.pt"
-    data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-    output_dir = "/scratch/paulabp/TFM/run_outputs_comprobacion/plots"
-    
-    evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
+    import traceback
+    try:
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm/best_model.pt"
+        data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_comprobacion/plots"
+        
+        evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
+    except Exception as e:
+        print("\n=================== ERROR CAPTURADO ===================")
+        traceback.print_exc()
+        print("=======================================================\n")
