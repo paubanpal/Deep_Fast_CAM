@@ -635,7 +635,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     print(f"--> Gráfica de modos KL guardada en: {kl_plot_path}")
 
 if __name__ == "__main__":
-    model_ckpt = "/scratch/paulabp/TFM/run_outputs_v5_50_acc_sched/best_model.pt"
+    model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm/best_model.pt"
     data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
     output_dir = "/scratch/paulabp/TFM/run_outputs_comprobacion/plots"
     
