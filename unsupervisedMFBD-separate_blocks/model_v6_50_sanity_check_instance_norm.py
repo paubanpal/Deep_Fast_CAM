@@ -35,25 +35,27 @@ class ConvBlock(nn.Module):
         self.use_bn = bn
         self.use_activation = activation
 
-        self.conv = nn.Conv2d(inplanes, outplanes, kernel_size=kernel_size, stride=stride)
-        self.reflection = nn.ReflectionPad2d(int((kernel_size-1)/2))
+        self.conv = nn.Conv2d(inplanes, outplanes, kernel_size=kernel_size, stride=stride, bias=not bn)
+        self.reflection = nn.ReflectionPad2d(kernel_size // 2)
 
-        if (bn):
-            self.bn = nn.BatchNorm2d(inplanes)
+        if self.use_bn:
+            # En pre-activación, la normalización actúa sobre los canales de entrada ('inplanes')
+            self.bn = nn.InstanceNorm2d(inplanes, affine=True)
 
-        self.elu = nn.ELU(inplace=False)
+        if self.use_activation:
+            self.elu = nn.ELU(inplace=False)
 
     def forward(self, x):
-        if (self.use_bn):
-            out = self.bn(x)
-            out = self.elu(out)
-            out = self.reflection(out)
-            out = self.conv(out)
-        else:
-            out = self.reflection(x)
-            out = self.conv(out)
-            if (self.use_activation):
+        out = x
+        if self.use_bn:
+            out = self.bn(out)
+            if self.use_activation:
                 out = self.elu(out)
+        elif self.use_activation:
+            out = self.elu(out)
+
+        out = self.reflection(out)
+        out = self.conv(out)
 
         return out
     
@@ -137,7 +139,7 @@ class LSTM(nn.Module):
         for module in self.modules():
             kaiming_init(module)
 
-        nn.init.normal_(self.C43.weight, std=1e-3)
+        #nn.init.normal_(self.C43.weight, std=1e-3)
         if self.C43.bias is not None:
             nn.init.zeros_(self.C43.bias)
 
@@ -429,8 +431,15 @@ class DynamicStackDataset(Dataset):
             self.test_samples.append(sorted_samples[1])
             self.train_samples.extend(sorted_samples[2:])
 
+        # SANITY CHECK MODIFICATION: Forzar que Train y Val usen exactamente el mismo único stack
+        single_stack = self.train_samples[0]
+        self.train_samples = [single_stack]
+        self.val_samples = [single_stack]
+        self.test_samples = [single_stack]
+
         print(f"Discovered {sum(len(s) for s in telescope_samples.values())} stack files across telescope subdirectories.")
         print(f"Split -> Train: {len(self.train_samples)} | Val: {len(self.val_samples)} | Test: {len(self.test_samples)}")
+        print(f"  [Sanity Check Target Stack] {single_stack['path'].name} | Total Frames: {single_stack['n_frames']}")
         for vs in self.val_samples:
             print(f"  [Val Target] {vs['path'].name} | Total Frames: {vs['n_frames']}")
 
@@ -547,27 +556,30 @@ if __name__ == "__main__":
     
     data_path = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
     dataset = DynamicStackDataset(root_dir=data_path, seed=42)
+    # SANITY CHECK MODIFICATION: Desactivar augmentations completamente
     augmentor = AugmentedDatasetWrapper(zoom_prob=0.0, zoom_range=(1.05, 1.25))
 
     # -------------------------------------------------------------
     # Configuración de Acumulación de Gradientes
     # -------------------------------------------------------------
-    accumulation_steps = 4  # Cambiar a 8 (o a len(dataset.train_samples) para toda la época)
+    num_train_samples = len(dataset.train_samples) # 1
+    accumulation_steps = num_train_samples
 
     # -------------------------------------------------------------
     # Model, Optimizer & Early Stopping Setup
     # -------------------------------------------------------------
-    n_frames_per_epoch = 10
+    n_frames_per_epoch = 50
     model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    num_epochs = 100
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
     loss_scale = 1.0
     
     patience = 50
     patience_counter = 0
     best_val_loss = float('inf')
-    num_epochs = 100
     
-    save_dir = Path("/scratch/paulabp/TFM/run_outputs_v5_10_acc")
+    save_dir = Path("/scratch/paulabp/TFM/model_v6_50_sanity_check_instance_norm")
     save_dir.mkdir(parents=True, exist_ok=True)
     best_model_path = save_dir / "best_model.pt"
 
@@ -588,9 +600,12 @@ if __name__ == "__main__":
         optimizer.zero_grad()
 
         for step, sample_info in enumerate(train_samples_shuffled, start=1):
-            # Random contiguous 50-frame slice for training
-            sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=None)
-            augmented_sample = augmentor.augment(sample)
+            # SANITY CHECK MODIFICATION: Fijar start_idx=0 para entrenar siempre sobre exactamente las mismas 50 imágenes
+            sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=0)
+            
+            # SANITY CHECK MODIFICATION: Desactivar las rotaciones/flips aleatorios para mantener las imágenes idénticas
+            # augmented_sample = augmentor.augment(sample)
+            augmented_sample = sample 
             
             images = augmented_sample["images"].unsqueeze(0).to(device)  # Add Batch Dim -> [1, 50, H, W]
             cfg = augmented_sample["config"]
@@ -628,6 +643,9 @@ if __name__ == "__main__":
         train_loss_val = float(np.mean(train_epoch_losses))
         train_loss_history.append(train_loss_val)
 
+        # Actualizar el learning rate al final de la época
+        scheduler.step()
+
         # --- VALIDATION PHASE (1 shortest stack per telescope, deterministic frames 0..49, unaugmented) ---
         model.eval()
         val_epoch_losses = []
@@ -659,7 +677,7 @@ if __name__ == "__main__":
         val_loss_val = float(np.mean(val_epoch_losses))
         val_loss_history.append(val_loss_val)
 
-        print(f"Epoch {epoch:03d}/{num_epochs} | Train Loss: {train_loss_val:.6e} | Val Loss: {val_loss_val:.6e}")
+        print(f"Epoch {epoch:03d}/{num_epochs} | LR: {scheduler.get_last_lr()[0]:.2e} | Train Loss: {train_loss_val:.6e} | Val Loss: {val_loss_val:.6e}")
 
         # --- CHECKPOINTING ---
         if val_loss_val < best_val_loss:
@@ -669,6 +687,7 @@ if __name__ == "__main__":
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'val_loss': best_val_loss,
             }, best_model_path)
             print(f"--> Saved best model checkpoint (Val Loss: {best_val_loss:.6e})")
