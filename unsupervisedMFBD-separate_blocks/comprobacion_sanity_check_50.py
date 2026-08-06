@@ -621,6 +621,22 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     plt.close()
     print(f"--> Gráfica del objeto guardada exitosamente en: {obj_plot_path}")
 
+    # --- Guardado individual de la reconstrucción en PNG ---
+    plt.figure(figsize=(6, 6))
+    plt.imshow(object_reconstructed, cmap='gray')
+    plt.axis('off')
+    plt.title("Objeto Reconstruido (Wiener)")
+    plt.tight_layout()
+    single_png_path = save_dir / "reconstructed_object_solo.png"
+    plt.savefig(single_png_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"--> Imagen individual PNG guardada en: {single_png_path}")
+
+    # --- Guardado individual de la reconstrucción en TIFF ---
+    single_tiff_path = save_dir / "reconstructed_object_solo.tiff"
+    tiff.imwrite(single_tiff_path, object_reconstructed.astype(np.float32))
+    print(f"--> Imagen individual TIFF guardada en: {single_tiff_path}")
+
     # --- TAREA 2: Espectro de los Modos KL ---
     print("[INFO] Generando gráfica de decaimiento KL...")
     coeff_np = coeff.squeeze().cpu().numpy()
