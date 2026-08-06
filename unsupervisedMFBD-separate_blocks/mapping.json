@@ -1,0 +1,11 @@
+{
+  "CS": {
+    "CHR181_cropped_shifted_128_apodized_FFT_magnitude.tif": "CHR181_cropped_shifted_128_apodized_FFT_phase.tif",
+    "wds15245_I_20230510_2000_3s_100p_selected_500_cropped_shifted_512_apodized_FFT_magnitude.tif": "wds15245_I_20230510_2000_3s_100p_selected_500_cropped_shifted_512_apodized_FFT_phase.tif",
+    "": ""
+  },
+  "NOT": {
+    "stack_imagen_03.tif": "stack_fft_03.tif",
+    "stack_imagen_04.tif": "stack_fft_04.tif"
+  }
+}
