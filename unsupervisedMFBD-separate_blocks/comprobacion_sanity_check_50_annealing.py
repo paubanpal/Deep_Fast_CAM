@@ -667,7 +667,7 @@ if __name__ == "__main__":
     try:
         model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_sanity_check_instance_norm_annealing/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_sanity_check_instance_norm/comprobacion_sanity_check_50_annealing/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_sanity_check_instance_norm_annealing/comprobacion_sanity_check_50_annealing/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
     except Exception as e:

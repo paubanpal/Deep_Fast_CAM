@@ -579,8 +579,9 @@ if __name__ == "__main__":
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
     loss_scale = 1.0
     
-    # Mode Annealing Configuration: número de épocas para alcanzar la totalidad de modos (modificable)
-    anneal_epochs = num_epochs / 2
+    # Mode Annealing por bloques de épocas (Step-wise):
+    anneal_epochs = 50   # Época en la que se alcanza el máximo de modos (119)
+    epoch_step = 10      # Cada cuántas épocas se da el salto de modos
 
     patience = 50
     patience_counter = 0
@@ -597,12 +598,19 @@ if __name__ == "__main__":
     # Epoch Loop: Process All Training Stacks & Val Stacks per Epoch
     # -------------------------------------------------------------
     for epoch in range(1, num_epochs + 1):
-        # Cálculo lineal de modos activos para esta época (de 2 a target_n_modes en anneal_epochs épocas)
+        # Cálculo de modos agrupados por escalones de 'epoch_step' épocas
         if epoch >= anneal_epochs:
             current_modes = target_n_modes
         else:
-            fraction = (epoch - 1) / (anneal_epochs - 1)
-            current_modes = int(round(2 + fraction * (target_n_modes - 2)))
+            # Agrupa épocas en bloques (ej. 1-10 -> bloque 0, 11-20 -> bloque 1...)
+            block_idx = (epoch - 1) // epoch_step
+            total_blocks = (anneal_epochs - 1) // epoch_step
+            
+            if total_blocks > 0:
+                fraction = block_idx / total_blocks
+                current_modes = int(round(2 + fraction * (target_n_modes - 2)))
+            else:
+                current_modes = 2
 
         # --- TRAINING PHASE ---
         model.train()
