@@ -596,10 +596,20 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
         coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance, lengths=lengths)
 
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) ---
-    print("[INFO] Generando gráfica del objeto reconstruido...")
+    print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+
+    # Guardar objeto reconstruido por separado en TIFF (32-bit float)
+    obj_tiff_path = save_dir / "reconstructed_object.tiff"
+    tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
+    print(f"--> Objeto reconstruido aislado guardado en TIFF exitosamente en: {obj_tiff_path}")
+
+    # Guardar objeto reconstruido por separado en PNG
+    obj_single_png_path = save_dir / "reconstructed_object.png"
+    plt.imsave(obj_single_png_path, object_reconstructed, cmap='gray')
+    print(f"--> Objeto reconstruido aislado guardado en PNG exitosamente en: {obj_single_png_path}")
 
     # Promedio en el eje temporal asegurando matriz 2D (H, W)
     degraded_mean = images[0].mean(dim=0).cpu().numpy()
@@ -619,7 +629,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     obj_plot_path = save_dir / "inspection_reconstructed_object.png"
     plt.savefig(obj_plot_path, dpi=300)
     plt.close()
-    print(f"--> Gráfica del objeto guardada exitosamente en: {obj_plot_path}")
+    print(f"--> Gráfica comparativa guardada exitosamente en: {obj_plot_path}")
 
     # --- TAREA 2: Espectro de los Modos KL ---
     print("[INFO] Generando gráfica de decaimiento KL...")
@@ -651,7 +661,7 @@ if __name__ == "__main__":
     try:
         model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
     except Exception as e:
