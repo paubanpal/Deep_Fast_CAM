@@ -293,8 +293,11 @@ class Network(nn.Module):
         self.register_buffer('pupil', pupil, persistent=False)
         self.register_buffer('basis', basis_tensor, persistent=False)
 
-    def compute_psfs(self, coeff):
-        wavefront = torch.einsum('ij,jkl->ikl', coeff, self.basis)
+    def compute_psfs(self, coeff, current_modes=None):
+        if current_modes is None:
+            current_modes = self.n_modes
+
+        wavefront = torch.einsum('ij,jkl->ikl', coeff[:, :current_modes], self.basis[:current_modes, :, :])
         phase = self.pupil[None, :, :] * torch.exp(1j * wavefront)
 
         ft = torch.fft.fft2(phase, norm="ortho")
@@ -346,7 +349,7 @@ class Network(nn.Module):
 
         return numerator, denominator, loss_mn
 
-    def forward(self, images, images_ft, variance, lengths=None):
+    def forward(self, images, images_ft, variance, lengths=None, current_modes=None):
         B, Nf = images.shape[0], images.shape[1]
 
         latent_features = self.cnn(images)
@@ -372,7 +375,7 @@ class Network(nn.Module):
         avg = rearrange(avg, 'b f m -> (b f) m')
 
         coeff_corrected = coeff - avg
-        psf, psf_ft, wavefront = self.compute_psfs(coeff_corrected)
+        psf, psf_ft, wavefront = self.compute_psfs(coeff_corrected, current_modes=current_modes)
         psf_ft = rearrange(psf_ft, '(b f) x y -> b f x y', f=Nf)
 
         numerator, denominator, loss = self.loss_and_wiener_filter(images_ft, psf_ft, variance, lengths=lengths)
@@ -596,10 +599,15 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
         coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance, lengths=lengths)
 
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) ---
-    print("[INFO] Generando gráfica del objeto reconstruido...")
+    print("[INFO] Generando gráfica y archivo TIFF del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+
+    # Guardar en formato TIFF de 32-bit float
+    obj_tiff_path = save_dir / "inspection_reconstructed_object.tiff"
+    tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
+    print(f"--> Objeto reconstruido guardado en TIFF exitosamente en: {obj_tiff_path}")
 
     # Promedio en el eje temporal asegurando matriz 2D (H, W)
     degraded_mean = images[0].mean(dim=0).cpu().numpy()
@@ -619,7 +627,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     obj_plot_path = save_dir / "inspection_reconstructed_object.png"
     plt.savefig(obj_plot_path, dpi=300)
     plt.close()
-    print(f"--> Gráfica del objeto guardada exitosamente en: {obj_plot_path}")
+    print(f"--> Comparativa guardada en PNG exitosamente en: {obj_plot_path}")
 
     # --- TAREA 2: Espectro de los Modos KL ---
     print("[INFO] Generando gráfica de decaimiento KL...")
