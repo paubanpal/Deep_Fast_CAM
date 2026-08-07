@@ -65,7 +65,7 @@ class CNN(nn.Module):
 
         self.n_lstm = n_lstm
 
-        # CAMBIO 1: La entrada recibe 2 canales (Módulo + Fase) en lugar de 1 canal de imagen espacial
+        # Entrada de 2 canales: Módulo + Fase
         self.A01 = ConvBlock(2, n, kernel_size=9, bn=False, activation=False)
 
         self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
@@ -91,12 +91,14 @@ class CNN(nn.Module):
             kaiming_init(module)
 
     def forward(self, images):
-        # Manejo de dimensión si no se especifica explícitamente el canal
-        if images.dim() == 4:
-            images = images.unsqueeze(2)
-
-        B, Nf, C, H, W = images.shape
-        tmp = images.view(B * Nf, C, H, W)
+        if images.dim() == 5:
+            B, Nf, C, H, W = images.shape
+            tmp = images.view(B * Nf, C, H, W)
+        elif images.dim() == 4:
+            tmp = images
+            B, Nf = images.shape[0], 1
+        else:
+            raise ValueError(f"Dimensión de entrada no soportada: {images.dim()}")
 
         A01 = self.A01(tmp)
 
@@ -350,6 +352,9 @@ class DynamicStackDataset(Dataset):
         if mapping_path.exists():
             with open(mapping_path, "r", encoding="utf-8") as f:
                 fft_map = json.load(f)
+            print(f"[INFO] Successfully loaded mapping.json with {len(fft_map)} telescope mappings.")
+        else:
+            print(f"Warning: mapping.json not found in {self.root_path}.")
 
         telescope_samples = {}
         for tel_dir in sorted(self.root_path.iterdir()):
@@ -380,7 +385,7 @@ class DynamicStackDataset(Dataset):
                 phase_path = tel_dir / phase_file
 
                 if not module_path.exists() or not phase_path.exists():
-                    print(f"Warning: Missing Module ({module_file}) or Phase ({phase_file}). Skipping.")
+                    print(f"Warning: Missing Module ({module_file}) or Phase ({phase_file}) in {tel_dir.name}. Skipping.")
                     continue
 
                 with tiff.TiffFile(module_path) as tf:
@@ -434,7 +439,6 @@ class DynamicStackDataset(Dataset):
         mod_tensor = torch.tensor(mod_slice, dtype=torch.float32)
         phase_tensor = torch.tensor(raw_phase, dtype=torch.float32)
 
-        # Aplicar recorte espacial si fuera necesario
         if self.crop_dim is not None and (H > self.crop_dim or W > self.crop_dim):
             start_h = (H - self.crop_dim) // 2
             start_w = (W - self.crop_dim) // 2
@@ -444,7 +448,7 @@ class DynamicStackDataset(Dataset):
         else:
             target_dim = H
 
-        # CAMBIO 2: Entrada del modelo de 2 canales [Módulo, Fase] con forma (N_frames, 2, H, W)
+        # Entrada del modelo de 2 canales [Módulo, Fase] -> (N_frames, 2, H, W)
         input_2ch = torch.stack([mod_tensor, phase_tensor], dim=1)
         
         # Reconstrucción compleja para la pérdida: F = |F| * exp(i * phase)
@@ -471,7 +475,6 @@ class AugmentedDatasetWrapper:
 
     def augment(self, sample: dict) -> dict:
         images = sample["images"]      # Shape: (N_frames, 2, H, W)
-        fft_complex = sample["images_ft"] # Shape: (N_frames, H, W)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -482,7 +485,6 @@ class AugmentedDatasetWrapper:
 
         augmented_frames = []
         for frame_2ch in images:
-            # 1. Rotaciones & Flips sobre ambos canales a la vez
             if angle != 0:
                 frame_2ch = TF.rotate(frame_2ch, angle)
             if do_hflip:
@@ -494,7 +496,6 @@ class AugmentedDatasetWrapper:
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Recalcular la FFT compleja tras las trasformaciones geométricas sobre el módulo y fase
         mod_aug = sample["images"][:, 0, :, :]
         phase_aug = sample["images"][:, 1, :, :]
         sample["images_ft"] = mod_aug * torch.exp(1j * phase_aug)
@@ -505,6 +506,7 @@ class AugmentedDatasetWrapper:
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    # Ruta corregida apuntando directamente a la subcarpeta FFTs donde se encuentran CS, NOT y mapping.json
     data_path = Path("/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs")
     
     dataset = DynamicStackDataset(root_dir=data_path, seed=42)
@@ -545,7 +547,7 @@ if __name__ == "__main__":
             sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=None)
             augmented_sample = augmentor.augment(sample)
             
-            # Entrada de 2 canales enviada a la GPU: [1, 50, 2, H, W]
+            # Entrada 2 canales: [1, 50, 2, H, W]
             images_2ch = augmented_sample["images"].unsqueeze(0).to(device)
             images_ft = augmented_sample["images_ft"].unsqueeze(0).to(device)
             cfg = augmented_sample["config"]
