@@ -498,6 +498,11 @@ class DynamicStackDataset(Dataset):
         mod_slice = raw_module[start_idx : start_idx + n_frames]
         raw_phase = tiff.imread(phase_path)[start_idx : start_idx + n_frames].astype("float32")
         
+        # Normalizar el flujo del Módulo de entrada dividiendo por su energía media
+        mod_sum = np.sum(mod_slice, axis=(-2, -1), keepdims=True)
+        mod_mean_flux = np.sum(mod_sum, axis=0, keepdims=True) / n_frames
+        mod_slice = mod_slice / (mod_mean_flux + 1e-8)
+
         mod_tensor = torch.tensor(mod_slice, dtype=torch.float32)
         phase_tensor = torch.tensor(raw_phase, dtype=torch.float32)
 
@@ -514,8 +519,9 @@ class DynamicStackDataset(Dataset):
         # Tensor de entrada de 2 canales [Módulo, Fase] -> Shape: (N_frames, 2, H, W)
         input_2ch = torch.stack([mod_tensor, phase_tensor], dim=1)
         
-        # Reconstrucción compleja para el filtro de Wiener: F = |F| * exp(i * phase)
-        fft_complex = mod_tensor * torch.exp(1j * phase_tensor)
+        # Reconstrucción compleja aplicando ifftshift para deshacer la traslación de la componente DC al centro
+        raw_complex = mod_tensor * torch.exp(1j * phase_tensor)
+        fft_complex = torch.fft.ifftshift(raw_complex, dim=(-2, -1))
 
         active_config = sample_info["config"].copy()
         active_config["target_dim"] = target_dim
@@ -580,10 +586,11 @@ class AugmentedDatasetWrapper:
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Recalcular la FFT compleja tras las transformaciones
+        # Recalcular la FFT compleja tras las transformaciones aplicando ifftshift
         mod_aug = sample["images"][:, 0, :, :]
         phase_aug = sample["images"][:, 1, :, :]
-        sample["images_ft"] = mod_aug * torch.exp(1j * phase_aug)
+        raw_complex_aug = mod_aug * torch.exp(1j * phase_aug)
+        sample["images_ft"] = torch.fft.ifftshift(raw_complex_aug, dim=(-2, -1))
 
         # 3. Update configuration metadata ONLY when zoomed in
         if is_128 and zoom_factor > 1.0:
@@ -645,7 +652,10 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
-    object_reconstructed = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+    object_reconstructed_raw = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+
+    # Aplicar restricción física de no-negatividad (positividad)
+    object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
 
     # Guardar objeto reconstruido por separado en TIFF (32-bit float)
     obj_tiff_path = save_dir / "reconstructed_object.tiff"
@@ -705,9 +715,9 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
 if __name__ == "__main__":
     import traceback
     try:
-        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_v2/best_model.pt"
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_v2/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
     except Exception as e:
