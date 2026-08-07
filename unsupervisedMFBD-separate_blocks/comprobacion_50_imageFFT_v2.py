@@ -717,7 +717,7 @@ if __name__ == "__main__":
     try:
         model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_v2/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
     except Exception as e:
