@@ -282,7 +282,10 @@ class Network(nn.Module):
         if lengths is not None:
             Nf = psf_ft.shape[1]
             lengths_dev = lengths.to(psf_ft.device)
-            mask = (torch.arange(Nf, device=psf_ft.device)[None, :] < lengths_dev[:, None])[:, :, None, None]
+            if lengths_dev.dim() == 1:
+                mask = (torch.arange(Nf, device=psf_ft.device)[None, :] < lengths_dev[:, None])[:, :, None, None]
+            else:
+                mask = (torch.arange(Nf, device=psf_ft.device)[None, :] < lengths_dev)[:, :, None, None]
             psf_ft = psf_ft * mask
             im_ft = im_ft * mask
 
@@ -304,7 +307,7 @@ class Network(nn.Module):
         loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
         if lengths is not None:
-            total_valid_frames = torch.sum(lengths_dev)
+            total_valid_frames = torch.sum(lengths_dev).item()
             loss_mn = (torch.sum(loss.real) / total_valid_frames)
         else:
             loss_mn = torch.mean(loss.real)
@@ -321,7 +324,10 @@ class Network(nn.Module):
 
         if lengths is not None:
             lengths_dev = lengths.to(images.device)
-            mask = torch.arange(Nf, device=images.device)[None, :] < lengths_dev[:, None]
+            if lengths_dev.dim() == 1:
+                mask = torch.arange(Nf, device=images.device)[None, :] < lengths_dev[:, None]
+            else:
+                mask = torch.arange(Nf, device=images.device)[None, :] < lengths_dev
             mask_expanded = mask.unsqueeze(-1)
 
             sum_coeff = torch.sum(tmp * mask_expanded, dim=1)
@@ -334,7 +340,7 @@ class Network(nn.Module):
         avg = avg * mask_tt
 
         avg = repeat(avg, 'b m -> b f m', f=Nf)
-        avg = rearrange(avg, 'b m -> (b f) m')
+        avg = rearrange(avg, 'b f m -> (b f) m')
 
         coeff_corrected = coeff - avg
         psf, psf_ft, wavefront = self.compute_psfs(coeff_corrected)
