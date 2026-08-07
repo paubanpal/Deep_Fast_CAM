@@ -327,7 +327,7 @@ class Network(nn.Module):
         avg = avg * mask_tt
 
         avg = repeat(avg, 'b m -> b f m', f=Nf)
-        avg = rearrange(avg, 'b m -> (b f) m')
+        avg = rearrange(avg, 'b f m -> (b f) m')
 
         coeff_corrected = coeff - avg
         psf, psf_ft, wavefront = self.compute_psfs(coeff_corrected)
