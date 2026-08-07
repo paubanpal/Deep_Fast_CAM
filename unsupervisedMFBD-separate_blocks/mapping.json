@@ -2,10 +2,19 @@
   "CS": {
     "CHR181_cropped_shifted_128_apodized_FFT_magnitude.tif": "CHR181_cropped_shifted_128_apodized_FFT_phase.tif",
     "wds15245_I_20230510_2000_3s_100p_selected_500_cropped_shifted_512_apodized_FFT_magnitude.tif": "wds15245_I_20230510_2000_3s_100p_selected_500_cropped_shifted_512_apodized_FFT_phase.tif",
-    "": ""
+    "hu874_I_20240228_max_3s_100p_selected_500_cropped_shifted_256_apodized_FFT_magnitude.tif": "hu874_I_20240228_max_3s_100p_selected_500_cropped_shifted_256_apodized_FFT_phase.tif",
+    "LAB4_cropped_shifted_128_apodized_FFT_magnitude.tif": "LAB4_cropped_shifted_128_apodized_FFT_phase.tif",
+    "STF1967_cropped_shifted_128_apodized_FFT_magnitude.tif": "STF1967_cropped_shifted_128_apodized_FFT_phase.tif",
+    "YSC8AB_cropped_shifted_128_apodized_FFT_magnitude.tif": "YSC8AB_cropped_shifted_128_apodized_FFT_phase.tif",
+    "COU1897_f3_I_20240317_max_3s_100p_selected_600_cropped_shifted_128_apodized_FFT_magnitude.tif": "COU1897_f3_I_20240317_max_3s_100p_selected_600_cropped_shifted_128_apodized_FFT_phase.tif",
+    "FK384_cropped_shifted_128_apodized_FFT_magnitude.tif": "FK384_cropped_shifted_128_apodized_FFT_phase.tif"
   },
   "NOT": {
-    "stack_imagen_03.tif": "stack_fft_03.tif",
-    "stack_imagen_04.tif": "stack_fft_04.tif"
+    "55Uma_NOT_cropped_shifted_128_apodized_FFT_magnitude.tif": "55Uma_NOT_cropped_shifted_128_apodized_FFT_phase.tif",
+    "CHR181_NOT_cropped_shifted_128_apodized_FFT_magnitude.tif": "CHR181_NOT_cropped_shifted_128_apodized_FFT_phase.tif",
+    "wds16289_NOT_cropped_shifted_512_apodized_FFT_magnitude.tif": "wds16289_NOT_cropped_shifted_512_apodized_FFT_phase.tif",
+    "wds14514_NOT_cropped_shifted_128_apodized_FFT_magnitude.tif": "wds14514_NOT_cropped_shifted_128_apodized_FFT_phase.tif",
+    "COU1987_I_20240124_NOT_max_3s_100p_selected_500_cropped_shifted_128_apodized_FFT_magnitude.tif": "COU1987_I_20240124_NOT_max_3s_100p_selected_500_cropped_shifted_128_apodized_FFT_phase.tif",
+    "KUI48_I_20240124_NOT_max_3s_100p_selected_500_cropped_shifted_128_apodized_FFT_magnitude.tif": "KUI48_I_20240124_NOT_max_3s_100p_selected_500_cropped_shifted_128_apodized_FFT_phase.tif"
   }
 }
