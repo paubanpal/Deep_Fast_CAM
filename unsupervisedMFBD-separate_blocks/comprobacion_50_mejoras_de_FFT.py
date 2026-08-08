@@ -39,7 +39,6 @@ class ConvBlock(nn.Module):
         self.reflection = nn.ReflectionPad2d(kernel_size // 2)
 
         if self.use_bn:
-            # En pre-activación, la normalización actúa sobre los canales de entrada ('inplanes')
             self.bn = nn.InstanceNorm2d(inplanes, affine=True)
 
         if self.use_activation:
@@ -139,7 +138,6 @@ class LSTM(nn.Module):
         for module in self.modules():
             kaiming_init(module)
 
-        #nn.init.normal_(self.C43.weight, std=1e-3)
         if self.C43.bias is not None:
             nn.init.zeros_(self.C43.bias)
 
@@ -186,35 +184,7 @@ class Network(nn.Module):
             
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
-            
-        # if (self.basis_for_wavefront == 'zernike'):
-        #     print("Computing Zernike modes...")
-        #     Z_machine = zern.ZernikeNaive(mask=[])
-        #     x = np.linspace(-1, 1, self.npix_image)
-        #     xx, yy = np.meshgrid(x, x)
-        #     rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
-        #     theta = np.arctan2(yy, xx)
-        #     aperture_mask = rho <= 1.0
 
-        #     basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
-            
-        #     for j in range(self.n_modes):
-        #         n, m = zern.zernIndex(j+2)
-        #         Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
-        #         basis[j,:,:] = Z * aperture_mask
-
-        # if (self.basis_for_wavefront == 'kl'):
-        #     print("Computing KL modes...")
-        #     kl = kl_modes.KL()
-        #     basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
-
-        # zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
-
-        # self.register_buffer('zeros', zeros)
-        # self.register_buffer('pupil', pupil)
-        # self.register_buffer('basis', torch.tensor(basis.astype('float32')))
-
-        # Leave buffer initialization deferred to update_telescope_basis()
         self.basis_cache = {}
 
         self.cnn = CNN(n=16, n_lstm=256)
@@ -224,22 +194,18 @@ class Network(nn.Module):
         self.lstm.weights_init()
 
     def update_telescope_basis(self, pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image):
-        # Initialize cache on the module if it doesn't exist yet
         if not hasattr(self, 'basis_cache'):
             self.basis_cache = {}
 
-        # Insert at the beginning of update_telescope_basis:
         if len(self.basis_cache) > 20:
             self.basis_cache.clear()
             torch.cuda.empty_cache()
 
-        # Round floating point values slightly to prevent tiny float rounding errors from missing the cache
         pixel_size_key = round(float(pixel_size), 6)
-    
         config_key = (pixel_size_key, telescope_diameter, central_obscuration, wavelength, int(npix_image))
     
         if getattr(self, 'current_config', None) == config_key:
-            return  # Already configured for this exact state on the current step
+            return
 
         self.pixel_size = pixel_size
         self.telescope_diameter = telescope_diameter
@@ -248,7 +214,6 @@ class Network(nn.Module):
         self.npix_image = int(npix_image)
         self.current_config = config_key
 
-        # Check if we already computed and cached this exact configuration earlier
         if config_key in self.basis_cache:
             cached_pupil, cached_basis, cached_zeros = self.basis_cache[config_key]
             self.register_buffer('pupil', cached_pupil.to(self.device), persistent=False)
@@ -256,7 +221,6 @@ class Network(nn.Module):
             self.register_buffer('zeros', cached_zeros.to(self.device), persistent=False)
             return
 
-        # --- Compute from scratch only if NOT in cache ---
         self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                 
         if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
@@ -285,10 +249,8 @@ class Network(nn.Module):
         zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32, device=self.device)
         basis_tensor = torch.tensor(basis.astype('float32'), device=self.device)
 
-        # Store tensors in dictionary cache
         self.basis_cache[config_key] = (pupil, basis_tensor, zeros)
 
-        # Register as active PyTorch buffers
         self.register_buffer('zeros', zeros, persistent=False)
         self.register_buffer('pupil', pupil, persistent=False)
         self.register_buffer('basis', basis_tensor, persistent=False)
@@ -299,7 +261,6 @@ class Network(nn.Module):
 
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
-        # psf_sum = torch.clamp(torch.sum(psf, [-1, -2], keepdim=True), min=1e-8)
         psf_sum = torch.sum(psf, [-1, -2], keepdim=True) + 1e-8
         psf_norm = psf / psf_sum
         otf = torch.fft.fft2(psf_norm, norm="ortho")
@@ -326,14 +287,7 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
-        #loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
-        # Extract real components and safely clamp the real denominator
-        
-        # denom_real = (variance[:, None, None] + denominator).real
-        # denom_safe = torch.clamp(denom_real, min=1e-8)
-        # loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
-        # Use explicit epsilon addition instead of hard clamping
         eps = 1e-6
         denom_safe = denominator.real + variance[:, None, None] + eps
         loss = tmp.real - (modulus_D_star_S.real / denom_safe)
@@ -380,11 +334,6 @@ class Network(nn.Module):
         return coeff_corrected, numerator, denominator, psf, psf_ft, loss
 
 class DynamicStackDataset(Dataset):
-    """
-    Manages loading and dynamic slicing of random stacks.
-    Loads a stack and extracts a contiguous block of N consecutive frames.
-    Selects validation/test samples based on shortest frame length to preserve longer stacks for training.
-    """
     def __init__(self, root_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
         self.root_path = Path(root_dir)
         self.crop_dim = crop_dim
@@ -405,7 +354,6 @@ class DynamicStackDataset(Dataset):
             tiff_files = sorted(list(tel_dir.glob("*.tiff")) + list(tel_dir.glob("*.tif")))
             telescope_samples[tel_dir.name] = []
             for tiff_path in tiff_files:
-                # Read tiff header to check total frame count
                 with tiff.TiffFile(tiff_path) as tf:
                     total_frames = len(tf.pages)
 
@@ -419,12 +367,10 @@ class DynamicStackDataset(Dataset):
         self.val_samples = []
         self.test_samples = []
 
-        # Split 1 val and 1 test stack from EACH telescope, prioritizing the shortest stacks
         for tel_name, samples in telescope_samples.items():
             if len(samples) < 3:
                 raise ValueError(f"Telescope directory {tel_name} has less than 3 stacks!")
                 
-            # Sort ascending by frame count: shortest stacks selected for Val/Test
             sorted_samples = sorted(samples, key=lambda s: s["n_frames"])
             
             self.val_samples.append(sorted_samples[0])
@@ -437,14 +383,8 @@ class DynamicStackDataset(Dataset):
             print(f"  [Val Target] {vs['path'].name} | Total Frames: {vs['n_frames']}")
 
     def sample_slice(self, sample_info: dict, n_frames: int = 50, start_idx: int | None = None):
-        """
-        Extracts a N-frame contiguous slice from a given sample dictionary.
-        If start_idx is None, samples randomly (training).
-        Pass start_idx=0 for deterministic validation from frame 0.
-        """
         tiff_path: Path = sample_info["path"]
         
-        # Read complete stack array
         raw_data = tiff.imread(tiff_path).astype("float32")
         total_frames, H, W = raw_data.shape
 
@@ -460,7 +400,6 @@ class DynamicStackDataset(Dataset):
         
         frames = raw_data[start_idx : start_idx + n_frames]
         
-        # Apply crop if necessary
         if self.crop_dim is not None and (H > self.crop_dim or W > self.crop_dim):
             start_h = (H - self.crop_dim) // 2
             start_w = (W - self.crop_dim) // 2
@@ -481,70 +420,11 @@ class DynamicStackDataset(Dataset):
             "start_frame": start_idx
         }
 
-class AugmentedDatasetWrapper:
+def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, eval_variance=1e-4, device='cuda'):
     """
-    Applies consistent spatial augmentations across all frames in a sampled sequence.
+    eval_variance: Controla la agresividad del filtro de Wiener durante la reconstrucción final.
+                   Probar valores como 1e-2, 1e-3, 1e-4 o 1e-5 para ajustar el halo estelar.
     """
-    def __init__(self, zoom_prob: float = 0.0, zoom_range: tuple = (1.05, 1.25)):
-        self.zoom_prob = zoom_prob
-        self.zoom_range = zoom_range
-
-    def augment(self, sample: dict) -> dict:
-        images = sample["images"]  # Shape: (N_frames, H, W)
-        cfg = dict(sample["config"])
-        
-        N, H, W = images.shape
-        
-        angle = random.choice([0, 90, 180, 270])
-        do_hflip = random.random() > 0.5
-        do_vflip = random.random() > 0.5
-
-        is_128 = (H == 128 and W == 128)
-        zoom_factor = 1.0
-        
-        # Decide if we apply zoom (only eligible for 128x128 images)
-        if is_128 and (random.random() < self.zoom_prob):
-            zoom_factor = random.uniform(*self.zoom_range)
-
-        augmented_frames = []
-        for frame in images:
-            frame_tensor = frame.unsqueeze(0).unsqueeze(0)
-            
-            # 1. Rotations & Flips
-            if angle != 0:
-                frame_tensor = TF.rotate(frame_tensor, angle)
-            if do_hflip:
-                frame_tensor = TF.hflip(frame_tensor)
-            if do_vflip:
-                frame_tensor = TF.vflip(frame_tensor)
-                
-            # 2. Conditional Resizing: ONLY if zoomed in
-            if is_128 and zoom_factor > 1.0:
-                intermediate_H = int(H * zoom_factor)
-                intermediate_W = int(W * zoom_factor)
-                zoomed = F.interpolate(
-                    frame_tensor, size=(intermediate_H, intermediate_W), 
-                    mode='bilinear', align_corners=False
-                )
-                # Scale up to 256x256 to accommodate the zoomed-in ROI
-                frame_tensor = F.interpolate(
-                    zoomed, size=(256, 256), mode='bilinear', align_corners=False
-                )
-
-            augmented_frames.append(frame_tensor.squeeze())
-
-        sample["images"] = torch.stack(augmented_frames, dim=0)
-        
-        # 3. Update configuration metadata ONLY when zoomed in
-        if is_128 and zoom_factor > 1.0:
-            total_scale_factor = 2.0 * zoom_factor
-            cfg["pixel_size"] = cfg["pixel_size"] / total_scale_factor
-            cfg["target_dim"] = 256
-
-        sample["config"] = cfg
-        return sample
-
-def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     print(f"[INFO] Usando dispositivo: {device}")
     
@@ -582,29 +462,28 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
         npix_image=H
     )
 
-    # 3. Preprocesamiento e Inferencia
+    # 3. Preprocesamiento e Inferencia (Exactamente como en el entrenamiento)
     print("[INFO] Ejecutando inferencia...")
     seq_sum = torch.sum(images, dim=(-2, -1), keepdim=True)
     seq_mean_flux = torch.sum(seq_sum, dim=1, keepdim=True) / images.shape[1]
     images_norm = images / (seq_mean_flux + 1e-8)
     
-    # Transformada de Fourier en el espacio de frecuencias des-shifteada (ifftshift) para alineación espacial correcta
-    images_ft_shifted = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
-    images_ft = torch.fft.ifftshift(images_ft_shifted, dim=(-2, -1))
+    # FFT2 directo sin fftshift ni ifftshift (compatible con la red entrenada)
+    images_ft = torch.fft.fft2(images_norm, dim=(-2, -1), norm="ortho")
     
-    variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+    variance_tensor = torch.tensor([eval_variance], dtype=torch.float32, device=device)
     lengths = torch.tensor([50], dtype=torch.int64, device=device)
 
     with torch.no_grad():
-        coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance, lengths=lengths)
+        coeff, num, den, psf, psf_ft, loss = model(images_norm, images_ft, variance_tensor, lengths=lengths)
 
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) ---
-    print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
+    print(f"[INFO] Reconstruyendo objeto con Wiener (variance = {eval_variance:.1e})...")
     eps = 1e-6
-    object_ft = num / (den.real + variance[:, None, None] + eps)
+    object_ft = num / (den.real + variance_tensor[:, None, None] + eps)
     object_reconstructed_raw = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
 
-    # Aplicar restricción física de no-negatividad (positividad)
+    # Restricción física de no-negatividad (positividad)
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
 
     # Guardar objeto reconstruido por separado en TIFF (32-bit float)
@@ -620,15 +499,12 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     # Promedio en el eje temporal asegurando matriz 2D (H, W)
     degraded_mean = images[0].mean(dim=0).cpu().numpy()
 
-    # Guardar la imagen media de la entrada degradada por separado en TIFF (32-bit float)
+    # Guardar la imagen media de la entrada degradada en TIFF y PNG
     mean_tiff_path = save_dir / "degraded_mean_input.tiff"
     tiff.imwrite(mean_tiff_path, degraded_mean.astype(np.float32))
-    print(f"--> Media de entrada degradada guardada en TIFF exitosamente en: {mean_tiff_path}")
-
-    # Guardar la imagen media de la entrada degradada por separado en PNG
+    
     mean_png_path = save_dir / "degraded_mean_input.png"
     plt.imsave(mean_png_path, degraded_mean, cmap='gray')
-    print(f"--> Media de entrada degradada guardada en PNG exitosamente en: {mean_png_path}")
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     axes[0].imshow(degraded_mean, cmap='gray')
@@ -636,7 +512,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     axes[0].axis('off')
 
     axes[1].imshow(object_reconstructed, cmap='gray')
-    axes[1].set_title("Objeto Reconstruido (Wiener)")
+    axes[1].set_title(f"Objeto Reconstruido (Wiener var={eval_variance:.1e})")
     axes[1].axis('off')
 
     plt.suptitle(f"Reconstrucción - Stack: {val_sample_info['path'].name}", fontsize=14)
@@ -679,7 +555,8 @@ if __name__ == "__main__":
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
         output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_mejoras_FFT/run_outputs_comprobacion_50/plots"
         
-        evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir)
+        # Ajusta eval_variance (ej. 1e-4 o 1e-5) para mitigar el halo estelar sin generar granulado
+        evaluate_reconstruction_and_modes(model_ckpt, data_dir, save_dir=output_dir, eval_variance=1e-4)
     except Exception as e:
         print("\n=================== ERROR CAPTURADO ===================")
         traceback.print_exc()
