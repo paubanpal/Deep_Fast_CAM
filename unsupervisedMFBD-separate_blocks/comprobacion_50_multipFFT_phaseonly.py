@@ -761,7 +761,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
 if __name__ == "__main__":
     import traceback
     try:
-        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_1channel1_multipFFT_phaseonly/best_model.pt"
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_1channel_multipFFT_phaseonly/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/mult_FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
         output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_1channel_multipFFT_phaseonly/run_outputs_comprobacion_50/plots"
