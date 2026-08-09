@@ -264,7 +264,7 @@ class Network(nn.Module):
             return
 
         # --- Compute from scratch only if NOT in cache ---
-        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                 
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
         if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
         
@@ -655,7 +655,11 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
-    object_reconstructed_raw = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+    
+    # Inversa de Fourier y recentrado espacial de la componente DC al centro
+    object_spatial_complex = torch.fft.ifft2(object_ft, norm="ortho")
+    object_spatial_centered = torch.fft.fftshift(object_spatial_complex, dim=(-2, -1))
+    object_reconstructed_raw = object_spatial_centered.real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad (positividad)
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
