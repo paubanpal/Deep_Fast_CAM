@@ -636,10 +636,6 @@ class AugmentedDatasetWrapper:
         return sample
 
 if __name__ == "__main__":
-    # Disable output buffering to ensure print statements write immediately to Slurm/HPC log files
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
-
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"[INFO] Active device: {device}")
@@ -811,6 +807,7 @@ if __name__ == "__main__":
         print(f"Finished! Run outputs written to {save_dir.resolve()}")
 
     except Exception as e:
+        import traceback
         print("\n=================== ERROR TRACEBACK ===================", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         print("=========================================================\n", file=sys.stderr)
