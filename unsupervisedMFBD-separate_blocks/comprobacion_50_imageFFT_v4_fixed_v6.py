@@ -237,7 +237,7 @@ class Network(nn.Module):
             return
 
         # --- Compute from scratch only if NOT in cache ---
-        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                 
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
         if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
         
@@ -498,7 +498,7 @@ class DynamicStackDataset(Dataset):
         active_config["target_dim"] = target_dim
 
         return {
-            "images": input_2ch,             # [N_frames, 2, H, W]
+            "images": input_2ch,            # [N_frames, 2, H, W]
             "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
@@ -627,10 +627,13 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     
-    # Aplicación de fftshift tras la IFFT2 para recentrar el objeto reconstruido en el origen
-    object_reconstructed_raw = torch.fft.fftshift(
-        torch.fft.ifft2(object_ft, norm="ortho").real
-    ).squeeze().cpu().numpy()
+    # Recentrar el espectro antes de la IFFT para que el objeto quede en el centro
+    object_ft_shifted = torch.fft.fftshift(object_ft, dim=(-2, -1))
+    
+    # Aplicación de IFFT2 sobre el espectro recentrado
+    object_reconstructed_raw = torch.fft.ifft2(
+        object_ft_shifted, norm="ortho"
+    ).real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad (positividad) y normalizar al máximo píxel
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
