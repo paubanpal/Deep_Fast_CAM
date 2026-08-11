@@ -17,8 +17,6 @@ matplotlib.use('Agg')  # Headless backend for HPC clusters
 import matplotlib.pyplot as plt
 import torchvision.transforms.functional as TF
 import random
-import traceback
-import sys
 
 def kaiming_init(m):
     if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -41,7 +39,7 @@ class ConvBlock(nn.Module):
         self.reflection = nn.ReflectionPad2d(kernel_size // 2)
 
         if self.use_bn:
-            # In pre-activation, normalization operates on the input channels ('inplanes')
+            # En pre-activación, la normalización actúa sobre los canales de entrada ('inplanes')
             self.bn = nn.InstanceNorm2d(inplanes, affine=True)
 
         if self.use_activation:
@@ -67,7 +65,7 @@ class CNN(nn.Module):
 
         self.n_lstm = n_lstm
 
-        # 2-channel input: Magnitude + Phase
+        # Entrada de 2 canales: Módulo + Fase
         self.A01 = ConvBlock(2, n, kernel_size=9, bn=False, activation=False)
 
         self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
@@ -100,7 +98,7 @@ class CNN(nn.Module):
             tmp = images
             B, Nf = images.shape[0], 1
         else:
-            raise ValueError(f"Unsupported input dimension: {images.dim()}")
+            raise ValueError(f"Dimensión de entrada no soportada: {images.dim()}")
 
         A01 = self.A01(tmp)
 
@@ -152,7 +150,7 @@ class LSTM(nn.Module):
     def forward(self, latent_features, lengths=None):
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                latent_features, lengths.to(torch.int64).cpu(), batch_first=True, enforce_sorted=False
+                latent_features, lengths.to(dtype=torch.int64, device='cpu'), batch_first=True, enforce_sorted=False
             )
             packed_out, _ = self.lstm(packed)
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
@@ -193,6 +191,33 @@ class Network(nn.Module):
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
             
+        # if (self.basis_for_wavefront == 'zernike'):
+        #     print("Computing Zernike modes...")
+        #     Z_machine = zern.ZernikeNaive(mask=[])
+        #     x = np.linspace(-1, 1, self.npix_image)
+        #     xx, yy = np.meshgrid(x, x)
+        #     rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
+        #     theta = np.arctan2(yy, xx)
+        #     aperture_mask = rho <= 1.0
+
+        #     basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
+            
+        #     for j in range(self.n_modes):
+        #         n, m = zern.zernIndex(j+2)
+        #         Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
+        #         basis[j,:,:] = Z * aperture_mask
+
+        # if (self.basis_for_wavefront == 'kl'):
+        #     print("Computing KL modes...")
+        #     kl = kl_modes.KL()
+        #     basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
+
+        # zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
+
+        # self.register_buffer('zeros', zeros)
+        # self.register_buffer('pupil', pupil)
+        # self.register_buffer('basis', torch.tensor(basis.astype('float32')))
+
         # Leave buffer initialization deferred to update_telescope_basis()
         self.pupil = None
         self.basis = None
@@ -239,7 +264,7 @@ class Network(nn.Module):
             return
 
         # --- Compute from scratch only if NOT in cache ---
-        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                 
+        self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
         if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
         
@@ -308,6 +333,12 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
+        #loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
+        # Extract real components and safely clamp the real denominator
+        
+        # denom_real = (variance[:, None, None] + denominator).real
+        # denom_safe = torch.clamp(denom_real, min=1e-8)
+        # loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
         # Use explicit epsilon addition instead of hard clamping
         eps = 1e-6
@@ -357,23 +388,21 @@ class Network(nn.Module):
 
 class DynamicStackDataset(Dataset):
     """
-    Loads Mapped Magnitude, Phase, and Original Real image paths specified in mapping_fixed.json within root_dir.
-    Supported JSON structure: 
-    "magnitude.tif": {"phase": "phase.tif", "original": "original.tif"}
+    Carga stacks emparejados de Módulo y Fase especificados en mapping.json dentro de root_dir.
+    Estructura JSON soportada: "magnitud.tif": "fase.tif"
     """
-    def __init__(self, root_dir: str | Path, originals_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
+    def __init__(self, root_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
         self.root_path = Path(root_dir)
-        self.originals_path = Path(originals_dir)
         self.crop_dim = crop_dim
         
         fft_map = {}
-        mapping_path = self.root_path / "mapping_fixed.json"
+        mapping_path = self.root_path / "mapping.json"
         if mapping_path.exists():
             with open(mapping_path, "r", encoding="utf-8") as f:
                 fft_map = json.load(f)
-            print(f"[INFO] Successfully loaded mapping_fixed.json with {len(fft_map)} mapped telescopes.")
+            print(f"[INFO] Se cargó mapping.json con {len(fft_map)} telescopios mapeados.")
         else:
-            print(f"Warning: mapping_fixed.json not found in {self.root_path}.")
+            print(f"Warning: mapping.json no encontrado en {self.root_path}.")
 
         telescope_samples = {}
         for tel_dir in sorted(self.root_path.iterdir()):
@@ -391,48 +420,32 @@ class DynamicStackDataset(Dataset):
             tel_fft_map = fft_map.get(tel_dir.name, {})
             telescope_samples[tel_dir.name] = []
 
-            for module_file, target_info in tel_fft_map.items():
+            # Mapeo directo: Clave = Magnitud/Módulo | Valor = Fase
+            for module_file, phase_file in tel_fft_map.items():
                 module_path = tel_dir / module_file
-
-                # Obtención de nombres de archivo desde mapping_fixed.json
-                if isinstance(target_info, dict):
-                    phase_file = target_info.get("phase", module_file)
-                    orig_file = target_info.get("original", module_file)
-                elif isinstance(target_info, list):
-                    phase_file = target_info[0]
-                    orig_file = target_info[1]
-                else:
-                    phase_file = target_info
-                    orig_file = module_file
-
                 phase_path = tel_dir / phase_file
-                
-                # Búsqueda del archivo de la imagen original en el directorio de originales asignado por código
-                orig_file_path = self.originals_path / tel_dir.name / orig_file
-                if not orig_file_path.exists():
-                    orig_file_path = self.originals_path / orig_file
 
                 if not module_path.exists():
-                    print(f"Warning: Module file does not exist: {module_path}. Skipping.")
+                    print(f"Warning: No existe el archivo de módulo: {module_path}. Omitiendo.")
                     continue
                 if not phase_path.exists():
-                    print(f"Warning: Phase file does not exist: {phase_path}. Skipping.")
+                    print(f"Warning: No existe el archivo de fase: {phase_path}. Omitiendo.")
                     continue
 
                 try:
                     with tiff.TiffFile(module_path) as tf:
                         total_frames = len(tf.pages)
                 except Exception as e:
-                    print(f"[ERROR] Failed to read {module_path.name}: {e}")
+                    print(f"[ERROR] Fallo al leer {module_path.name}: {e}")
                     continue
 
                 telescope_samples[tel_dir.name].append({
                     "module_path": module_path,
                     "phase_path": phase_path,
-                    "orig_path": orig_file_path,
                     "config": tel_config,
                     "n_frames": total_frames,
-                    "filename": module_file
+                    "filename": module_file,
+                    "tel_dir_name": tel_dir.name
                 })
 
         self.train_samples = []
@@ -442,9 +455,10 @@ class DynamicStackDataset(Dataset):
         # Split 1 val and 1 test stack from EACH telescope, prioritizing the shortest stacks
         for tel_name, samples in telescope_samples.items():
             if len(samples) < 3:
-                print(f"Warning: Telescope {tel_name} has fewer than 3 valid stacks.")
+                print(f"Warning: Telescopio {tel_name} tiene menos de 3 stacks válidos.")
                 continue
                 
+            # Sort ascending by frame count: shortest stacks selected for Val/Test
             sorted_samples = sorted(samples, key=lambda s: s["n_frames"])
             
             self.val_samples.append(sorted_samples[0])
@@ -457,18 +471,18 @@ class DynamicStackDataset(Dataset):
             print(f"  [Val Target] {vs['module_path'].name} | Total Frames: {vs['n_frames']}")
 
         if len(self.train_samples) == 0:
-            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check mapping_fixed.json.")
+            raise RuntimeError("[ERROR CRÍTICO] La lista de muestras de entrenamiento está vacía. Revisa el mapping.json.")
 
     def sample_slice(self, sample_info: dict, n_frames: int = 50, start_idx: int | None = None):
         """
         Extracts a N-frame contiguous slice from a given sample dictionary.
-        Loads Magnitude and Phase for CNN input, and Original Spatial Image to compute FFT2 for Wiener Loss.
+        If start_idx is None, samples randomly (training).
+        Pass start_idx=0 for deterministic validation from frame 0.
         """
         module_path: Path = sample_info["module_path"]
         phase_path: Path = sample_info["phase_path"]
-        orig_path: Path = sample_info["orig_path"]
         
-        # Read complete stack array for module and phase
+        # Read complete stack array for both module and phase
         raw_module = tiff.imread(module_path).astype("float32")
         total_frames, H, W = raw_module.shape
 
@@ -485,16 +499,13 @@ class DynamicStackDataset(Dataset):
         mod_slice = raw_module[start_idx : start_idx + n_frames]
         raw_phase = tiff.imread(phase_path)[start_idx : start_idx + n_frames].astype("float32")
         
+        # Normalizar el flujo del Módulo de entrada dividiendo por su energía media
+        mod_sum = np.sum(mod_slice, axis=(-2, -1), keepdims=True)
+        mod_mean_flux = np.sum(mod_sum, axis=0, keepdims=True) / n_frames
+        mod_slice = mod_slice / (mod_mean_flux + 1e-8)
+
         mod_tensor = torch.tensor(mod_slice, dtype=torch.float32)
         phase_tensor = torch.tensor(raw_phase, dtype=torch.float32)
-
-        # Carga la imagen real original desde la ruta asignada
-        if orig_path.exists():
-            raw_orig = tiff.imread(orig_path)[start_idx : start_idx + n_frames].astype("float32")
-            orig_tensor = torch.tensor(raw_orig, dtype=torch.float32)
-        else:
-            print(f"Warning: Original file not found at {orig_path}. Falling back to magnitude tensor.")
-            orig_tensor = mod_tensor
 
         # Apply crop if necessary
         if self.crop_dim is not None and (H > self.crop_dim or W > self.crop_dim):
@@ -502,28 +513,26 @@ class DynamicStackDataset(Dataset):
             start_w = (W - self.crop_dim) // 2
             mod_tensor = mod_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             phase_tensor = phase_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
-            orig_tensor = orig_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             target_dim = self.crop_dim
         else:
             target_dim = H
 
-        # Preprocesamiento de entrada de 2 canales para la red (Módulo y Fase)
-        dc_val = mod_tensor[:, 0:1, 0:1]
-        mod_tensor_norm = mod_tensor / (dc_val + 1e-8)
-        mod_tensor_cnn = torch.log1p(mod_tensor_norm)
-        input_2ch = torch.stack([mod_tensor_cnn, phase_tensor], dim=1)
-
-        # Cálculo de la FFT2 compleja directamente sobre la imagen real original para la Loss
-        fft_complex = torch.fft.fft2(orig_tensor, norm="ortho")
+        # Tensor de entrada de 2 canales [Módulo, Fase] -> Shape: (N_frames, 2, H, W)
+        input_2ch = torch.stack([mod_tensor, phase_tensor], dim=1)
+        
+        # Reconstrucción compleja aplicando ifftshift para deshacer la traslación de la componente DC al centro
+        raw_complex = mod_tensor * torch.exp(1j * phase_tensor)
+        fft_complex = torch.fft.ifftshift(raw_complex, dim=(-2, -1))
 
         active_config = sample_info["config"].copy()
         active_config["target_dim"] = target_dim
 
         return {
             "images": input_2ch,             # [N_frames, 2, H, W]
-            "images_ft": fft_complex,        # [N_frames, H, W] (complex)
+            "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
+            "tel_dir_name": sample_info.get("tel_dir_name", ""),
             "start_frame": start_idx
         }
 
@@ -536,8 +545,7 @@ class AugmentedDatasetWrapper:
         self.zoom_range = zoom_range
 
     def augment(self, sample: dict) -> dict:
-        images = sample["images"]        # Shape: (N_frames, 2, H, W)
-        images_ft = sample["images_ft"]  # Shape: (N_frames, H, W) (complex)
+        images = sample["images"]  # Shape: (N_frames, 2, H, W)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -580,41 +588,11 @@ class AugmentedDatasetWrapper:
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Direct spatial transformations on the complex FFT tensor (images_ft) via Real and Imaginary components
-        real_ft = images_ft.real
-        imag_ft = images_ft.imag
-
-        if angle != 0:
-            real_ft = TF.rotate(real_ft, angle)
-            imag_ft = TF.rotate(imag_ft, angle)
-        if do_hflip:
-            real_ft = TF.hflip(real_ft)
-            imag_ft = TF.hflip(imag_ft)
-        if do_vflip:
-            real_ft = TF.vflip(real_ft)
-            imag_ft = TF.vflip(imag_ft)
-
-        if is_128 and zoom_factor > 1.0:
-            intermediate_H = int(H * zoom_factor)
-            intermediate_W = int(W * zoom_factor)
-            
-            real_zoomed = F.interpolate(
-                real_ft.unsqueeze(1), size=(intermediate_H, intermediate_W), 
-                mode='bilinear', align_corners=False
-            )
-            imag_zoomed = F.interpolate(
-                imag_ft.unsqueeze(1), size=(intermediate_H, intermediate_W), 
-                mode='bilinear', align_corners=False
-            )
-            
-            real_ft = F.interpolate(
-                real_zoomed, size=(256, 256), mode='bilinear', align_corners=False
-            ).squeeze(1)
-            imag_ft = F.interpolate(
-                imag_zoomed, size=(256, 256), mode='bilinear', align_corners=False
-            ).squeeze(1)
-
-        sample["images_ft"] = torch.complex(real_ft, imag_ft)
+        # Recalcular la FFT compleja tras las transformaciones aplicando ifftshift
+        mod_aug = sample["images"][:, 0, :, :]
+        phase_aug = sample["images"][:, 1, :, :]
+        raw_complex_aug = mod_aug * torch.exp(1j * phase_aug)
+        sample["images_ft"] = torch.fft.ifftshift(raw_complex_aug, dim=(-2, -1))
 
         # 3. Update configuration metadata ONLY when zoomed in
         if is_128 and zoom_factor > 1.0:
@@ -625,188 +603,171 @@ class AugmentedDatasetWrapper:
         sample["config"] = cfg
         return sample
 
+def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, save_dir, device='cuda'):
+    device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    print(f"[INFO] Usando dispositivo: {device}")
+    
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    orig_data_path = Path(orig_data_path)
+    
+    # 1. Cargar Dataset de Validación
+    print("[INFO] Cargando dataset de validación...")
+    dataset = DynamicStackDataset(root_dir=data_path, seed=42)
+    val_sample_info = dataset.val_samples[0]
+    print(f"[INFO] Stack seleccionado: {val_sample_info['module_path'].name}")
+    
+    val_sample = dataset.sample_slice(val_sample_info, n_frames=50, start_idx=0)
+    images_2ch = val_sample["images"].unsqueeze(0).to(device)     # [1, 50, 2, H, W]
+    images_ft = val_sample["images_ft"].unsqueeze(0).to(device)   # [1, 50, H, W]
+    cfg = val_sample["config"]
+    H, W = images_2ch.shape[-2], images_2ch.shape[-1]
+
+    # 2. Inicializar y Cargar Modelo Entrenado
+    print("[INFO] Cargando modelo y pesos...")
+    model = Network(device=device, n_modes=119, n_frames=50, basis_for_wavefront='kl').to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
+    model.eval()
+
+    print("[INFO] Actualizando bases del telescopio...")
+    model.update_telescope_basis(
+        pixel_size=cfg["pixel_size"],
+        telescope_diameter=cfg["telescope_diameter"],
+        central_obscuration=cfg.get("central_obscuration", 0.0),
+        wavelength=cfg["wavelength"],
+        npix_image=H
+    )
+
+    # 3. Preprocesamiento e Inferencia
+    print("[INFO] Ejecutando inferencia...")
+    variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
+    lengths = torch.tensor([50], dtype=torch.int64, device=device)
+
+    with torch.no_grad():
+        coeff, num, den, psf, psf_ft, loss = model(images_2ch, images_ft, variance, lengths=lengths)
+
+    # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) y Búsqueda de Imagen Original ---
+    print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
+    eps = 1e-6
+    object_ft = num / (den.real + variance[:, None, None] + eps)
+    
+    # Inversa de Fourier y recentrado espacial de la componente DC al centro
+    object_spatial_complex = torch.fft.ifft2(object_ft, norm="ortho")
+    object_spatial_centered = torch.fft.fftshift(object_spatial_complex, dim=(-2, -1))
+    object_reconstructed_raw = object_spatial_centered.real.squeeze().cpu().numpy()
+
+    # Aplicar restricción física de no-negatividad (positividad)
+    object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
+
+    # Guardar objeto reconstruido por separado en TIFF (32-bit float)
+    obj_tiff_path = save_dir / "reconstructed_object.tiff"
+    tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
+    print(f"--> Objeto reconstruido aislado guardado en TIFF exitosamente en: {obj_tiff_path}")
+
+    # Guardar objeto reconstruido por separado en PNG
+    obj_single_png_path = save_dir / "reconstructed_object.png"
+    plt.imsave(obj_single_png_path, object_reconstructed, cmap='gray')
+    print(f"--> Objeto reconstruido aislado guardado en PNG exitosamente en: {obj_single_png_path}")
+
+    # Búsqueda del stack de imágenes originales correspondiente
+    tel_name = val_sample_info["tel_dir_name"]
+    mod_filename = val_sample_info["module_path"].name
+    
+    # Extraer identificador base del nombre (e.g. "CHR181", "wds15245", etc.)
+    base_stem = mod_filename.split('_cropped')[0]
+    
+    orig_tel_dir = orig_data_path / tel_name
+    matched_orig_path = None
+    
+    if orig_tel_dir.exists():
+        for orig_file in sorted(orig_tel_dir.glob("*.tif*")):
+            if base_stem in orig_file.name:
+                matched_orig_path = orig_file
+                break
+                
+    if matched_orig_path and matched_orig_path.exists():
+        print(f"[INFO] Imagen original equivalente encontrada en: {matched_orig_path}")
+        raw_orig_stack = tiff.imread(matched_orig_path)[:50].astype("float32")
+        
+        # Aplicar el mismo recorte central si la imagen original es más grande
+        orig_H, orig_W = raw_orig_stack.shape[-2], raw_orig_stack.shape[-1]
+        if orig_H > H or orig_W > W:
+            start_h = (orig_H - H) // 2
+            start_w = (orig_W - W) // 2
+            raw_orig_stack = raw_orig_stack[:, start_h:start_h + H, start_w:start_w + W]
+            
+        degraded_mean = raw_orig_stack.mean(axis=0)
+    else:
+        print(f"[WARNING] No se encontró coincidencia directa para '{base_stem}' en {orig_tel_dir}. Usando media de canal de módulo.")
+        degraded_mean = images_2ch[0, :, 0, :, :].mean(dim=0).cpu().numpy()
+
+    # Guardar la imagen media de la entrada degradada por separado en TIFF (32-bit float)
+    mean_tiff_path = save_dir / "degraded_mean_input.tiff"
+    tiff.imwrite(mean_tiff_path, degraded_mean.astype(np.float32))
+    print(f"--> Media de entrada degradada guardada en TIFF exitosamente en: {mean_tiff_path}")
+
+    # Guardar la imagen media de la entrada degradada por separado en PNG
+    mean_png_path = save_dir / "degraded_mean_input.png"
+    plt.imsave(mean_png_path, degraded_mean, cmap='gray')
+    print(f"--> Media de entrada degradada guardada en PNG exitosamente en: {mean_png_path}")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    axes[0].imshow(degraded_mean, cmap='gray')
+    axes[0].set_title("Media Simple (Entrada Original)")
+    axes[0].axis('off')
+
+    axes[1].imshow(object_reconstructed, cmap='gray')
+    axes[1].set_title("Objeto Reconstruido (Wiener)")
+    axes[1].axis('off')
+
+    plt.suptitle(f"Reconstrucción - Stack: {val_sample_info['module_path'].name}", fontsize=14)
+    plt.tight_layout()
+    
+    obj_plot_path = save_dir / "inspection_reconstructed_object.png"
+    plt.savefig(obj_plot_path, dpi=300)
+    plt.close()
+    print(f"--> Gráfica comparativa guardada exitosamente en: {obj_plot_path}")
+
+    # --- TAREA 2: Espectro de los Modos KL ---
+    print("[INFO] Generando gráfica de decaimiento KL...")
+    coeff_np = coeff.squeeze().cpu().numpy()
+    mean_abs_coeff = np.mean(np.abs(coeff_np), axis=0)
+    std_coeff = np.std(coeff_np, axis=0)
+
+    mode_indices = np.arange(1, 120)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(mode_indices, mean_abs_coeff, marker='o', markersize=3, color='crimson', label=r'Amplitud Media $|\alpha_k|$')
+    plt.fill_between(mode_indices, mean_abs_coeff - std_coeff, mean_abs_coeff + std_coeff, color='crimson', alpha=0.2, label=r'Desviación ($\sigma$)')
+    
+    plt.yscale('log')
+    plt.xlabel("Índice del Modo KL")
+    plt.ylabel("Amplitud del Coeficiente (rad)")
+    plt.title("Espectro de Amplitud de los Modos KL")
+    plt.grid(True, which="both", linestyle="--", alpha=0.6)
+    plt.legend()
+    plt.tight_layout()
+    
+    kl_plot_path = save_dir / "inspection_kl_modes_decay.png"
+    plt.savefig(kl_plot_path, dpi=300)
+    plt.close()
+    print(f"--> Gráfica de modos KL guardada exitosamente en: {kl_plot_path}")
+
 if __name__ == "__main__":
-    # Disable output buffering to ensure print statements write immediately to Slurm/HPC log files
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
-
+    import traceback
     try:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"[INFO] Active device: {device}")
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_fixed/best_model.pt"
+        data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/mult_FFTs"
+        orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_fixed/run_outputs_comprobacion_50/plots"
         
-        # Ruta del directorio de Módulo y Fase
-        data_path = Path("/scratch/paulabp/TFM/images/images_for_network/FFT/mult_FFTs")
-        
-        # Directorio de las imágenes reales originales especificadas por código
-        originals_dir = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
-        
-        print(f"[INFO] Loading dataset from: {data_path.resolve()}")
-        print(f"[INFO] Loading real original images from: {originals_dir.resolve()}")
-        
-        dataset = DynamicStackDataset(root_dir=data_path, originals_dir=originals_dir, seed=42)
-        augmentor = AugmentedDatasetWrapper(zoom_prob=0.0, zoom_range=(1.05, 1.25))
-
-        # -------------------------------------------------------------
-        # Gradient Accumulation Configuration
-        # -------------------------------------------------------------
-        num_train_samples = len(dataset.train_samples) # 10
-        accumulation_steps = max(1, num_train_samples)
-
-        # -------------------------------------------------------------
-        # Model, Optimizer & Early Stopping Setup
-        # -------------------------------------------------------------
-        n_frames_per_epoch = 50
-        model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-        num_epochs = 100
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-        loss_scale = 1.0
-        
-        patience = 50
-        patience_counter = 0
-        best_val_loss = float('inf')
-        
-        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_fixed")
-        save_dir.mkdir(parents=True, exist_ok=True)
-        best_model_path = save_dir / "best_model.pt"
-
-        train_loss_history = []
-        val_loss_history = []
-
-        # -------------------------------------------------------------
-        # Epoch Loop: Process All Training Stacks & Val Stacks per Epoch
-        # -------------------------------------------------------------
-        for epoch in range(1, num_epochs + 1):
-            # --- TRAINING PHASE ---
-            model.train()
-            train_epoch_losses = []
-            
-            train_samples_shuffled = list(dataset.train_samples)
-            random.shuffle(train_samples_shuffled)
-            
-            optimizer.zero_grad()
-
-            for step, sample_info in enumerate(train_samples_shuffled, start=1):
-                # Random contiguous 50-frame slice for training
-                sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=None)
-                augmented_sample = augmentor.augment(sample)
-                
-                images_2ch = augmented_sample["images"].unsqueeze(0).to(device)  # Shape: [1, N_frames, 2, H, W]
-                images_ft = augmented_sample["images_ft"].unsqueeze(0).to(device) # Shape: [1, N_frames, H, W]
-                cfg = augmented_sample["config"]
-                H, W = images_2ch.shape[-2], images_2ch.shape[-1]
-
-                model.update_telescope_basis(
-                    pixel_size=cfg["pixel_size"],
-                    telescope_diameter=cfg["telescope_diameter"],
-                    central_obscuration=cfg.get("central_obscuration", 0.0),
-                    wavelength=cfg["wavelength"],
-                    npix_image=H
-                )
-                
-                variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
-                lengths = torch.tensor([images_2ch.shape[1]], dtype=torch.int64, device=device)
-
-                coeff, num, den, psf, otf, train_loss = model(images_2ch, images_ft, variance, lengths=lengths)
-                
-                scaled_loss = (train_loss * loss_scale) / accumulation_steps
-                scaled_loss.backward()
-                
-                train_epoch_losses.append(train_loss.item())
-
-                if (step % accumulation_steps == 0) or (step == len(train_samples_shuffled)):
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
-
-            train_loss_val = float(np.mean(train_epoch_losses))
-            train_loss_history.append(train_loss_val)
-
-            # Update learning rate at epoch end
-            scheduler.step()
-
-            # --- VALIDATION PHASE (1 shortest stack per telescope, deterministic frames 0..49, unaugmented) ---
-            model.eval()
-            val_epoch_losses = []
-            with torch.no_grad():
-                for sample_info in dataset.val_samples:
-                    # Deterministic evaluation using first 50 frames (start_idx=0)
-                    val_sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=0)
-                    val_images_2ch = val_sample["images"].unsqueeze(0).to(device)
-                    val_images_ft = val_sample["images_ft"].unsqueeze(0).to(device)
-                    val_cfg = val_sample["config"]
-                    val_H = val_images_2ch.shape[-2]
-
-                    model.update_telescope_basis(
-                        pixel_size=val_cfg["pixel_size"],
-                        telescope_diameter=val_cfg["telescope_diameter"],
-                        central_obscuration=val_cfg.get("central_obscuration", 0.0),
-                        wavelength=val_cfg["wavelength"],
-                        npix_image=val_H
-                    )
-
-                    _, _, _, _, _, val_loss = model(val_images_2ch, val_images_ft, variance, lengths=lengths)
-                    val_epoch_losses.append(val_loss.item())
-
-            val_loss_val = float(np.mean(val_epoch_losses))
-            val_loss_history.append(val_loss_val)
-
-            print(f"Epoch {epoch:03d}/{num_epochs} | LR: {scheduler.get_last_lr()[0]:.2e} | Train Loss: {train_loss_val:.6e} | Val Loss: {val_loss_val:.6e}")
-
-            # --- CHECKPOINTING ---
-            if val_loss_val < best_val_loss:
-                best_val_loss = val_loss_val
-                patience_counter = 0
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'val_loss': best_val_loss,
-                }, best_model_path)
-                print(f"--> Saved best model checkpoint (Val Loss: {best_val_loss:.6e})")
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping triggered at epoch {epoch}.")
-                    break
-
-        # Save training logs and plots
-        history = {
-            "train_loss": train_loss_history,
-            "val_loss": val_loss_history,
-            "best_val_loss": best_val_loss
-        }
-        with open(save_dir / "loss_history.json", "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=4)
-
-        plt.figure(figsize=(9, 5))
-        plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
-        plt.gca().ticklabel_format(useOffset=False, style='plain')
-        plt.xlabel("Epoch")
-        plt.ylabel("MOMFBD Loss")
-        plt.title("Training Loss")
-        plt.grid(True, which="both", linestyle="--", alpha=0.5)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_dir / "train_loss_plot.png", dpi=300)
-        plt.close()
-
-        plt.figure(figsize=(9, 5))
-        plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
-        plt.gca().ticklabel_format(useOffset=False, style='plain')
-        plt.xlabel("Epoch")
-        plt.ylabel("MOMFBD Loss")
-        plt.title("Validation Loss")
-        plt.grid(True, which="both", linestyle="--", alpha=0.5)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_dir / "val_loss_plot.png", dpi=300)
-        plt.close()
-
-        print(f"Finished! Run outputs written to {save_dir.resolve()}")
-
+        evaluate_reconstruction_and_modes(model_ckpt, data_dir, orig_data_dir, save_dir=output_dir)
     except Exception as e:
-        print("\n=================== ERROR TRACEBACK ===================", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        print("=========================================================\n", file=sys.stderr)
+        print("\n=================== ERROR CAPTURADO ===================")
+        traceback.print_exc()
+        print("=======================================================\n")
