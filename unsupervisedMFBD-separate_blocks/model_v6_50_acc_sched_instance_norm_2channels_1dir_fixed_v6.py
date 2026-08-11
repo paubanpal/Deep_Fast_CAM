@@ -190,33 +190,6 @@ class Network(nn.Module):
             
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
-            
-        # if (self.basis_for_wavefront == 'zernike'):
-        #     print("Computing Zernike modes...")
-        #     Z_machine = zern.ZernikeNaive(mask=[])
-        #     x = np.linspace(-1, 1, self.npix_image)
-        #     xx, yy = np.meshgrid(x, x)
-        #     rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
-        #     theta = np.arctan2(yy, xx)
-        #     aperture_mask = rho <= 1.0
-
-        #     basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
-            
-        #     for j in range(self.n_modes):
-        #         n, m = zern.zernIndex(j+2)
-        #         Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
-        #         basis[j,:,:] = Z * aperture_mask
-
-        # if (self.basis_for_wavefront == 'kl'):
-        #     print("Computing KL modes...")
-        #     kl = kl_modes.KL()
-        #     basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
-
-        # zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
-
-        # self.register_buffer('zeros', zeros)
-        # self.register_buffer('pupil', pupil)
-        # self.register_buffer('basis', torch.tensor(basis.astype('float32')))
 
         # Leave buffer initialization deferred to update_telescope_basis()
         self.pupil = None
@@ -437,7 +410,8 @@ class DynamicStackDataset(Dataset):
                     "phase_path": phase_path,
                     "config": tel_config,
                     "n_frames": total_frames,
-                    "filename": module_file
+                    "filename": module_file,
+                    "tel_dir_name": tel_dir.name
                 })
 
         self.train_samples = []
@@ -528,6 +502,7 @@ class DynamicStackDataset(Dataset):
             "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
+            "tel_dir_name": sample_info.get("tel_dir_name", ""),
             "start_frame": start_idx
         }
 
@@ -744,21 +719,21 @@ if __name__ == "__main__":
         with open(save_dir / "loss_history.json", "w", encoding="utf-8") as f:
             json.dump(history, f, indent=4)
 
-        # Gráfica combinada
+        # Gráfica combinada (Entrenamiento y Validación juntas)
         plt.figure(figsize=(9, 5))
         plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
         plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
         plt.gca().ticklabel_format(useOffset=False, style='plain')
         plt.xlabel("Epoch")
         plt.ylabel("MOMFBD Loss")
-        plt.title("Combined Loss")
+        plt.title("Training & Validation Loss")
         plt.grid(True, which="both", linestyle="--", alpha=0.5)
         plt.legend()
         plt.tight_layout()
         plt.savefig(save_dir / "loss_plot.png", dpi=300)
         plt.close()
 
-        # Gráfica Entrenamiento
+        # Gráfica individual de Entrenamiento
         plt.figure(figsize=(9, 5))
         plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
         plt.gca().ticklabel_format(useOffset=False, style='plain')
@@ -771,7 +746,7 @@ if __name__ == "__main__":
         plt.savefig(save_dir / "train_loss_plot.png", dpi=300)
         plt.close()
 
-        # Gráfica Validación
+        # Gráfica individual de Validación
         plt.figure(figsize=(9, 5))
         plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
         plt.gca().ticklabel_format(useOffset=False, style='plain')
@@ -785,3 +760,10 @@ if __name__ == "__main__":
         plt.close()
 
         print(f"Finished! Run outputs written to {save_dir.resolve()}")
+
+    except Exception as e:
+        import traceback
+        import sys
+        print("\n=================== ERROR TRACEBACK ===================", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        print("=========================================================\n", file=sys.stderr)
