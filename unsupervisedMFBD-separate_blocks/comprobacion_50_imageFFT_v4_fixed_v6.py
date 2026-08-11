@@ -516,6 +516,7 @@ class AugmentedDatasetWrapper:
 
     def augment(self, sample: dict) -> dict:
         images = sample["images"]  # Shape: (N_frames, 2, H, W)
+        images_ft = sample["images_ft"]  # Shape: (N_frames, H, W) (complex)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape

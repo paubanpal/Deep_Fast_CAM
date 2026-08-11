@@ -306,7 +306,6 @@ class Network(nn.Module):
 
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
-        # psf_sum = torch.clamp(torch.sum(psf, [-1, -2], keepdim=True), min=1e-8)
         psf_sum = torch.sum(psf, [-1, -2], keepdim=True) + 1e-8
         psf_norm = psf / psf_sum
         otf = torch.fft.fft2(psf_norm, norm="ortho")
@@ -333,12 +332,6 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
-        #loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
-        # Extract real components and safely clamp the real denominator
-        
-        # denom_real = (variance[:, None, None] + denominator).real
-        # denom_safe = torch.clamp(denom_real, min=1e-8)
-        # loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
         # Use explicit epsilon addition instead of hard clamping
         eps = 1e-6
@@ -444,8 +437,7 @@ class DynamicStackDataset(Dataset):
                     "phase_path": phase_path,
                     "config": tel_config,
                     "n_frames": total_frames,
-                    "filename": module_file,
-                    "tel_dir_name": tel_dir.name
+                    "filename": module_file
                 })
 
         self.train_samples = []
@@ -536,7 +528,6 @@ class DynamicStackDataset(Dataset):
             "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
-            "tel_dir_name": sample_info.get("tel_dir_name", ""),
             "start_frame": start_idx
         }
 
@@ -550,6 +541,7 @@ class AugmentedDatasetWrapper:
 
     def augment(self, sample: dict) -> dict:
         images = sample["images"]  # Shape: (N_frames, 2, H, W)
+        images_ft = sample["images_ft"]  # Shape: (N_frames, H, W) (complex)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -638,7 +630,7 @@ if __name__ == "__main__":
         patience_counter = 0
         best_val_loss = float('inf')
         
-        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_fixed_v5")
+        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_fixed_v6")
         save_dir.mkdir(parents=True, exist_ok=True)
         best_model_path = save_dir / "best_model.pt"
 
@@ -752,6 +744,21 @@ if __name__ == "__main__":
         with open(save_dir / "loss_history.json", "w", encoding="utf-8") as f:
             json.dump(history, f, indent=4)
 
+        # Gráfica combinada
+        plt.figure(figsize=(9, 5))
+        plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
+        plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
+        plt.gca().ticklabel_format(useOffset=False, style='plain')
+        plt.xlabel("Epoch")
+        plt.ylabel("MOMFBD Loss")
+        plt.title("Combined Loss")
+        plt.grid(True, which="both", linestyle="--", alpha=0.5)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(save_dir / "loss_plot.png", dpi=300)
+        plt.close()
+
+        # Gráfica Entrenamiento
         plt.figure(figsize=(9, 5))
         plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
         plt.gca().ticklabel_format(useOffset=False, style='plain')
@@ -764,6 +771,7 @@ if __name__ == "__main__":
         plt.savefig(save_dir / "train_loss_plot.png", dpi=300)
         plt.close()
 
+        # Gráfica Validación
         plt.figure(figsize=(9, 5))
         plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
         plt.gca().ticklabel_format(useOffset=False, style='plain')
@@ -777,9 +785,3 @@ if __name__ == "__main__":
         plt.close()
 
         print(f"Finished! Run outputs written to {save_dir.resolve()}")
-
-    except Exception as e:
-        import traceback
-        print("\n=================== ERROR TRACEBACK ===================", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        print("=========================================================\n", file=sys.stderr)
