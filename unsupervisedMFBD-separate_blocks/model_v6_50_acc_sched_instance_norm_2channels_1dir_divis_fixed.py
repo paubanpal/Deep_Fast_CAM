@@ -638,7 +638,7 @@ if __name__ == "__main__":
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"[INFO] Active device: {device}")
         
-        # Ruta del directorio de Módulo y Fase
+        # Ruta del directorio de Módulo y Fase (divis_FFTs)
         data_path = Path("/scratch/paulabp/TFM/images/images_for_network/FFT/divis_FFTs")
         
         # Directorio de las imágenes reales originales especificadas por código
