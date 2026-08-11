@@ -513,6 +513,10 @@ class DynamicStackDataset(Dataset):
         else:
             target_dim = H
 
+        # Normalización del módulo por el valor pico de la frecuencia (0,0) / DC
+        dc_val = mod_tensor.amax(dim=(-2, -1), keepdim=True)
+        mod_tensor = mod_tensor / (dc_val + 1e-8)
+
         # 2-channel input tensor [Magnitude, Phase] -> Shape: (N_frames, 2, H, W)
         input_2ch = torch.stack([mod_tensor, phase_tensor], dim=1)
         
