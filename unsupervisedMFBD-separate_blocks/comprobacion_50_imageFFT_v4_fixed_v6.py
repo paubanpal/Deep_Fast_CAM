@@ -630,9 +630,18 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     # Recentrar el espectro antes de la IFFT para que el objeto quede en el centro
     object_ft_shifted = torch.fft.fftshift(object_ft, dim=(-2, -1))
     
-    # Aplicación de IFFT2 sobre el espectro recentrado
+    # NUEVO: Crear una ventana espacial suave (Cosine/Hann window) para eliminar el patrón granulado de alta frecuencia
+    H_img, W_img = object_ft_shifted.shape[-2], object_ft_shifted.shape[-1]
+    window_y = torch.hann_window(H_img, periodic=False, device=device)
+    window_x = torch.hann_window(W_img, periodic=False, device=device)
+    twod_window = torch.outer(window_y, window_x)
+    
+    # Aplicar la ventana al espectro centrado para suprimir discontinuidades en los bordes
+    object_ft_smooth = object_ft_shifted * twod_window
+
+    # Aplicación de IFFT2 sobre el espectro suavizado y recentrado
     object_reconstructed_raw = torch.fft.ifft2(
-        object_ft_shifted, norm="ortho"
+        object_ft_smooth, norm="ortho"
     ).real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad (positividad) y normalizar al máximo píxel
