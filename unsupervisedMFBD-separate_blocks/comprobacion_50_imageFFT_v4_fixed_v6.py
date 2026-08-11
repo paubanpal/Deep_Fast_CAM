@@ -630,16 +630,19 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     # Recentrar el espectro antes de la IFFT para que el objeto quede en el centro
     object_ft_shifted = torch.fft.fftshift(object_ft, dim=(-2, -1))
     
-    # NUEVO: Crear una ventana espacial suave (Cosine/Hann window) para eliminar el patrón granulado de alta frecuencia
+    # NUEVO: Aplicar un filtro pasa-bajos gaussiano suave en el dominio de Fourier para eliminar el granulado de alta frecuencia
     H_img, W_img = object_ft_shifted.shape[-2], object_ft_shifted.shape[-1]
-    window_y = torch.hann_window(H_img, periodic=False, device=device)
-    window_x = torch.hann_window(W_img, periodic=False, device=device)
-    twod_window = torch.outer(window_y, window_x)
+    y = torch.linspace(-1, 1, H_img, device=device)
+    x = torch.linspace(-1, 1, W_img, device=device)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
     
-    # Aplicar la ventana al espectro centrado para suprimir discontinuidades en los bordes
-    object_ft_smooth = object_ft_shifted * twod_window
+    # Ajusta sigma si quieres más o menos suavizado (ej. 0.35 para preservar nitidez eliminando el ruido)
+    sigma = 0.35
+    gaussian_filter = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+    
+    object_ft_smooth = object_ft_shifted * gaussian_filter
 
-    # Aplicación de IFFT2 sobre el espectro suavizado y recentrado
+    # Aplicación de IFFT2 sobre el espectro filtrado y recentrado
     object_reconstructed_raw = torch.fft.ifft2(
         object_ft_smooth, norm="ortho"
     ).real.squeeze().cpu().numpy()
