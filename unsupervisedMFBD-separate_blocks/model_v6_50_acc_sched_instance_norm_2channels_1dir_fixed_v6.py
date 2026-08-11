@@ -388,8 +388,8 @@ class Network(nn.Module):
 
 class DynamicStackDataset(Dataset):
     """
-    Loads paired Magnitude and Phase stacks specified in mapping.json within root_dir.
-    Supported JSON structure: "magnitude.tif": "phase.tif"
+    Carga stacks emparejados de Módulo y Fase especificados en mapping.json dentro de root_dir.
+    Estructura JSON soportada: "magnitud.tif": "fase.tif"
     """
     def __init__(self, root_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
         self.root_path = Path(root_dir)
@@ -400,9 +400,9 @@ class DynamicStackDataset(Dataset):
         if mapping_path.exists():
             with open(mapping_path, "r", encoding="utf-8") as f:
                 fft_map = json.load(f)
-            print(f"[INFO] Successfully loaded mapping.json with {len(fft_map)} mapped telescopes.")
+            print(f"[INFO] Se cargó mapping.json con {len(fft_map)} telescopios mapeados.")
         else:
-            print(f"Warning: mapping.json not found in {self.root_path}.")
+            print(f"Warning: mapping.json no encontrado en {self.root_path}.")
 
         telescope_samples = {}
         for tel_dir in sorted(self.root_path.iterdir()):
@@ -420,23 +420,23 @@ class DynamicStackDataset(Dataset):
             tel_fft_map = fft_map.get(tel_dir.name, {})
             telescope_samples[tel_dir.name] = []
 
-            # Direct mapping: Key = Magnitude/Module file | Value = Phase file
+            # Mapeo directo: Clave = Magnitud/Módulo | Valor = Fase
             for module_file, phase_file in tel_fft_map.items():
                 module_path = tel_dir / module_file
                 phase_path = tel_dir / phase_file
 
                 if not module_path.exists():
-                    print(f"Warning: Module file does not exist: {module_path}. Skipping.")
+                    print(f"Warning: No existe el archivo de módulo: {module_path}. Omitiendo.")
                     continue
                 if not phase_path.exists():
-                    print(f"Warning: Phase file does not exist: {phase_path}. Skipping.")
+                    print(f"Warning: No existe el archivo de fase: {phase_path}. Omitiendo.")
                     continue
 
                 try:
                     with tiff.TiffFile(module_path) as tf:
                         total_frames = len(tf.pages)
                 except Exception as e:
-                    print(f"[ERROR] Failed to read {module_path.name}: {e}")
+                    print(f"[ERROR] Fallo al leer {module_path.name}: {e}")
                     continue
 
                 telescope_samples[tel_dir.name].append({
@@ -444,7 +444,8 @@ class DynamicStackDataset(Dataset):
                     "phase_path": phase_path,
                     "config": tel_config,
                     "n_frames": total_frames,
-                    "filename": module_file
+                    "filename": module_file,
+                    "tel_dir_name": tel_dir.name
                 })
 
         self.train_samples = []
@@ -454,7 +455,7 @@ class DynamicStackDataset(Dataset):
         # Split 1 val and 1 test stack from EACH telescope, prioritizing the shortest stacks
         for tel_name, samples in telescope_samples.items():
             if len(samples) < 3:
-                print(f"Warning: Telescope {tel_name} has fewer than 3 valid stacks.")
+                print(f"Warning: Telescopio {tel_name} tiene menos de 3 stacks válidos.")
                 continue
                 
             # Sort ascending by frame count: shortest stacks selected for Val/Test
@@ -470,7 +471,7 @@ class DynamicStackDataset(Dataset):
             print(f"  [Val Target] {vs['module_path'].name} | Total Frames: {vs['n_frames']}")
 
         if len(self.train_samples) == 0:
-            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check mapping.json.")
+            raise RuntimeError("[ERROR CRÍTICO] La lista de muestras de entrenamiento está vacía. Revisa el mapping.json.")
 
     def sample_slice(self, sample_info: dict, n_frames: int = 50, start_idx: int | None = None):
         """
@@ -515,15 +516,16 @@ class DynamicStackDataset(Dataset):
         else:
             target_dim = H
 
-        # Reconstrucción del plano de Fourier complejo intacto para la Loss
+        # Reconstrucción del plano de Fourier complejo aplicando ifftshift para deshacer la traslación de la componente DC al centro
         dc_val = mod_tensor[:, 0:1, 0:1]
         mod_tensor_norm = mod_tensor / (dc_val + 1e-8)
-        fft_complex = mod_tensor_norm * torch.exp(1j * phase_tensor)
+        raw_complex = mod_tensor_norm * torch.exp(1j * phase_tensor)
+        fft_complex = torch.fft.ifftshift(raw_complex, dim=(-2, -1))
 
         # Escala logarítmica para la entrada de la CNN
         mod_tensor_cnn = torch.log1p(mod_tensor_norm)
 
-        # 2-channel input tensor [Magnitude, Phase] -> Shape: (N_frames, 2, H, W)
+        # Tensor de entrada de 2 canales [Módulo, Fase] -> Shape: (N_frames, 2, H, W)
         input_2ch = torch.stack([mod_tensor_cnn, phase_tensor], dim=1)
 
         active_config = sample_info["config"].copy()
@@ -531,9 +533,10 @@ class DynamicStackDataset(Dataset):
 
         return {
             "images": input_2ch,             # [N_frames, 2, H, W]
-            "images_ft": fft_complex,        # [N_frames, H, W] (complex)
+            "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
+            "tel_dir_name": sample_info.get("tel_dir_name", ""),
             "start_frame": start_idx
         }
 
@@ -546,8 +549,7 @@ class AugmentedDatasetWrapper:
         self.zoom_range = zoom_range
 
     def augment(self, sample: dict) -> dict:
-        images = sample["images"]        # Shape: (N_frames, 2, H, W)
-        images_ft = sample["images_ft"]  # Shape: (N_frames, H, W) (complex)
+        images = sample["images"]  # Shape: (N_frames, 2, H, W)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -590,41 +592,11 @@ class AugmentedDatasetWrapper:
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Direct spatial transformations on the complex FFT tensor (images_ft) via Real and Imaginary components
-        real_ft = images_ft.real
-        imag_ft = images_ft.imag
-
-        if angle != 0:
-            real_ft = TF.rotate(real_ft, angle)
-            imag_ft = TF.rotate(imag_ft, angle)
-        if do_hflip:
-            real_ft = TF.hflip(real_ft)
-            imag_ft = TF.hflip(imag_ft)
-        if do_vflip:
-            real_ft = TF.vflip(real_ft)
-            imag_ft = TF.vflip(imag_ft)
-
-        if is_128 and zoom_factor > 1.0:
-            intermediate_H = int(H * zoom_factor)
-            intermediate_W = int(W * zoom_factor)
-            
-            real_zoomed = F.interpolate(
-                real_ft.unsqueeze(1), size=(intermediate_H, intermediate_W), 
-                mode='bilinear', align_corners=False
-            )
-            imag_zoomed = F.interpolate(
-                imag_ft.unsqueeze(1), size=(intermediate_H, intermediate_W), 
-                mode='bilinear', align_corners=False
-            )
-            
-            real_ft = F.interpolate(
-                real_zoomed, size=(256, 256), mode='bilinear', align_corners=False
-            ).squeeze(1)
-            imag_ft = F.interpolate(
-                imag_zoomed, size=(256, 256), mode='bilinear', align_corners=False
-            ).squeeze(1)
-
-        sample["images_ft"] = torch.complex(real_ft, imag_ft)
+        # Recalcular la FFT compleja tras las transformaciones aplicando ifftshift
+        mod_aug = sample["images"][:, 0, :, :]
+        phase_aug = sample["images"][:, 1, :, :]
+        raw_complex_aug = mod_aug * torch.exp(1j * phase_aug)
+        sample["images_ft"] = torch.fft.ifftshift(raw_complex_aug, dim=(-2, -1))
 
         # 3. Update configuration metadata ONLY when zoomed in
         if is_128 and zoom_factor > 1.0:
@@ -666,7 +638,7 @@ if __name__ == "__main__":
         patience_counter = 0
         best_val_loss = float('inf')
         
-        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_fixed_v6")
+        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imageFFT_fixed_v5")
         save_dir.mkdir(parents=True, exist_ok=True)
         best_model_path = save_dir / "best_model.pt"
 

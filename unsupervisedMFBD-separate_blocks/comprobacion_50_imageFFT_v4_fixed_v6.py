@@ -190,33 +190,6 @@ class Network(nn.Module):
             
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
-            
-        # if (self.basis_for_wavefront == 'zernike'):
-        #     print("Computing Zernike modes...")
-        #     Z_machine = zern.ZernikeNaive(mask=[])
-        #     x = np.linspace(-1, 1, self.npix_image)
-        #     xx, yy = np.meshgrid(x, x)
-        #     rho = self.overfill * np.sqrt(xx ** 2 + yy ** 2)
-        #     theta = np.arctan2(yy, xx)
-        #     aperture_mask = rho <= 1.0
-
-        #     basis = np.zeros((self.n_modes, self.npix_image, self.npix_image))
-            
-        #     for j in range(self.n_modes):
-        #         n, m = zern.zernIndex(j+2)
-        #         Z = Z_machine.Z_nm(n, m, rho, theta, True, 'Jacobi')
-        #         basis[j,:,:] = Z * aperture_mask
-
-        # if (self.basis_for_wavefront == 'kl'):
-        #     print("Computing KL modes...")
-        #     kl = kl_modes.KL()
-        #     basis = kl.precalculate_covariance(npix_image = self.npix_image, n_modes_max = self.n_modes, first_noll = 1, overfill=self.overfill)
-
-        # zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32)
-
-        # self.register_buffer('zeros', zeros)
-        # self.register_buffer('pupil', pupil)
-        # self.register_buffer('basis', torch.tensor(basis.astype('float32')))
 
         # Leave buffer initialization deferred to update_telescope_basis()
         self.pupil = None
@@ -306,7 +279,6 @@ class Network(nn.Module):
 
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
-        # psf_sum = torch.clamp(torch.sum(psf, [-1, -2], keepdim=True), min=1e-8)
         psf_sum = torch.sum(psf, [-1, -2], keepdim=True) + 1e-8
         psf_norm = psf / psf_sum
         otf = torch.fft.fft2(psf_norm, norm="ortho")
@@ -333,12 +305,6 @@ class Network(nn.Module):
         numerator = torch.sum(S_star_D, dim=1)
 
         tmp = torch.sum(modulus_D, dim=1)
-        #loss = tmp - modulus_D_star_S / torch.clamp(variance[:, None, None] + denominator, min=1e-8)
-        # Extract real components and safely clamp the real denominator
-        
-        # denom_real = (variance[:, None, None] + denominator).real
-        # denom_safe = torch.clamp(denom_real, min=1e-8)
-        # loss = tmp.real - (modulus_D_star_S.real / denom_safe)
 
         # Use explicit epsilon addition instead of hard clamping
         eps = 1e-6
@@ -485,7 +451,7 @@ class DynamicStackDataset(Dataset):
         # Read complete stack array for both module and phase
         raw_module = tiff.imread(module_path).astype("float32")
         
-        # Normalizar el stack completo del Módulo por su valor píxel máximo
+        # Normalización del stack completo del Módulo por su valor píxel máximo
         raw_module = raw_module / (raw_module.max() + 1e-8)
         
         total_frames, H, W = raw_module.shape
@@ -516,12 +482,17 @@ class DynamicStackDataset(Dataset):
         else:
             target_dim = H
 
-        # Tensor de entrada de 2 canales [Módulo, Fase] -> Shape: (N_frames, 2, H, W)
-        input_2ch = torch.stack([mod_tensor, phase_tensor], dim=1)
-        
-        # Reconstrucción compleja aplicando ifftshift para deshacer la traslación de la componente DC al centro
-        raw_complex = mod_tensor * torch.exp(1j * phase_tensor)
+        # Reconstrucción del plano de Fourier complejo aplicando ifftshift para deshacer la traslación de la componente DC al centro
+        dc_val = mod_tensor[:, 0:1, 0:1]
+        mod_tensor_norm = mod_tensor / (dc_val + 1e-8)
+        raw_complex = mod_tensor_norm * torch.exp(1j * phase_tensor)
         fft_complex = torch.fft.ifftshift(raw_complex, dim=(-2, -1))
+
+        # Escala logarítmica para la entrada de la CNN
+        mod_tensor_cnn = torch.log1p(mod_tensor_norm)
+
+        # Tensor de entrada de 2 canales [Módulo, Fase] -> Shape: (N_frames, 2, H, W)
+        input_2ch = torch.stack([mod_tensor_cnn, phase_tensor], dim=1)
 
         active_config = sample_info["config"].copy()
         active_config["target_dim"] = target_dim
@@ -654,10 +625,15 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
-    object_reconstructed_raw = torch.fft.ifft2(object_ft, norm="ortho").real.squeeze().cpu().numpy()
+    
+    # Aplicación de fftshift tras la IFFT2 para recentrar el objeto reconstruido en el origen
+    object_reconstructed_raw = torch.fft.fftshift(
+        torch.fft.ifft2(object_ft, norm="ortho").real
+    ).squeeze().cpu().numpy()
 
-    # Aplicar restricción física de no-negatividad (positividad)
+    # Aplicar restricción física de no-negatividad (positividad) y normalizar al máximo píxel
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
+    object_reconstructed = object_reconstructed / (object_reconstructed.max() + 1e-8)
 
     # Guardar objeto reconstruido por separado en TIFF (32-bit float)
     obj_tiff_path = save_dir / "reconstructed_object.tiff"
@@ -703,6 +679,9 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     else:
         print(f"[WARNING] No se encontró coincidencia directa para '{base_stem}' en {orig_tel_dir}. Usando media de canal de módulo.")
         degraded_mean = images_2ch[0, :, 0, :, :].mean(dim=0).cpu().numpy()
+
+    # Normalización de la media degradada observada por su valor píxel máximo
+    degraded_mean = degraded_mean / (degraded_mean.max() + 1e-8)
 
     # Guardar la imagen media de la entrada degradada por separado en TIFF (32-bit float)
     mean_tiff_path = save_dir / "degraded_mean_input.tiff"
