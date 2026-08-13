@@ -734,10 +734,10 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
 if __name__ == "__main__":
     import traceback
     try:
-        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_fixed_v4/best_model.pt"
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_phaseonly_fixed_v4/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/mult_FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_fixed_v4/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_multipFFT_phaseonly_fixed_v4/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, orig_data_dir, save_dir=output_dir)
     except Exception as e:
