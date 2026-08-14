@@ -672,7 +672,7 @@ if __name__ == "__main__":
         patience_counter = 0
         best_val_loss = float('inf')
         
-        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_1dir_fixed_v8")
+        save_dir = Path("/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8")
         save_dir.mkdir(parents=True, exist_ok=True)
         best_model_path = save_dir / "best_model.pt"
 

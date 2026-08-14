@@ -652,14 +652,13 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     
-    # Inversa de Fourier y recentrado espacial de la componente DC al centro
+    # Inversa de Fourier directa sin fftshift erróneo
     object_spatial_complex = torch.fft.ifft2(object_ft, norm="ortho")
-    object_spatial_centered = torch.fft.fftshift(object_spatial_complex, dim=(-2, -1))
-    object_reconstructed_raw = object_spatial_centered.real.squeeze().cpu().numpy()
+    object_reconstructed_raw = object_spatial_complex.real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad (positividad)
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
-
+    
     # Guardar objeto reconstruido por separado en TIFF (32-bit float)
     obj_tiff_path = save_dir / "reconstructed_object.tiff"
     tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
@@ -757,10 +756,10 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
 if __name__ == "__main__":
     import traceback
     try:
-        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_1dir_fixed_v8/best_model.pt"
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_1dir_fixed_v8/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, orig_data_dir, save_dir=output_dir)
     except Exception as e:
