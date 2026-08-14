@@ -41,7 +41,6 @@ class ConvBlock(nn.Module):
         self.reflection = nn.ReflectionPad2d(kernel_size // 2)
 
         if self.use_bn:
-            # In pre-activation, normalization operates on the input channels ('inplanes')
             self.bn = nn.InstanceNorm2d(inplanes, affine=True)
 
         if self.use_activation:
@@ -145,7 +144,6 @@ class LSTM(nn.Module):
         for module in self.modules():
             kaiming_init(module)
 
-        #nn.init.normal_(self.C43.weight, std=1e-3)
         if self.C43.bias is not None:
             nn.init.zeros_(self.C43.bias)
 
@@ -193,7 +191,6 @@ class Network(nn.Module):
         pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
         pupil = torch.tensor(pupil.astype('float32'))
             
-        # Leave buffer initialization deferred to update_telescope_basis()
         self.pupil = None
         self.basis = None
         self.zeros = None
@@ -206,22 +203,18 @@ class Network(nn.Module):
         self.lstm.weights_init()
 
     def update_telescope_basis(self, pixel_size, telescope_diameter, central_obscuration, wavelength, npix_image):
-        # Initialize cache on the module if it doesn't exist yet
         if not hasattr(self, 'basis_cache'):
             self.basis_cache = {}
 
-        # Insert at the beginning of update_telescope_basis:
         if len(self.basis_cache) > 20:
             self.basis_cache.clear()
             torch.cuda.empty_cache()
 
-        # Round floating point values slightly to prevent tiny float rounding errors from missing the cache
         pixel_size_key = round(float(pixel_size), 6)
-    
         config_key = (pixel_size_key, telescope_diameter, central_obscuration, wavelength, int(npix_image))
     
         if getattr(self, 'current_config', None) == config_key:
-            return  # Already configured for this exact state on the current step
+            return  
 
         self.pixel_size = pixel_size
         self.telescope_diameter = telescope_diameter
@@ -230,7 +223,6 @@ class Network(nn.Module):
         self.npix_image = int(npix_image)
         self.current_config = config_key
 
-        # Check if we already computed and cached this exact configuration earlier
         if config_key in self.basis_cache:
             cached_pupil, cached_basis, cached_zeros = self.basis_cache[config_key]
             self.pupil = cached_pupil.to(self.device)
@@ -238,7 +230,6 @@ class Network(nn.Module):
             self.zeros = cached_zeros.to(self.device)
             return
 
-        # --- Compute from scratch only if NOT in cache ---
         self.overfill = util.psf_scale(self.wavelength, self.telescope_diameter, self.pixel_size)                
         if self.overfill < 1.0:
             raise Exception(f"Pixel size {self.pixel_size} arcsec is not small enough to model D={self.telescope_diameter} cm")
@@ -267,10 +258,8 @@ class Network(nn.Module):
         zeros = torch.zeros((self.npix_image, self.npix_image, 1), dtype=torch.float32, device=self.device)
         basis_tensor = torch.tensor(basis.astype('float32'), device=self.device)
 
-        # Store tensors in dictionary cache
         self.basis_cache[config_key] = (pupil, basis_tensor, zeros)
 
-        # Assign active PyTorch buffers
         self.pupil = pupil
         self.basis = basis_tensor
         self.zeros = zeros
@@ -281,7 +270,6 @@ class Network(nn.Module):
 
         ft = torch.fft.fft2(phase, norm="ortho")
         psf = (torch.conj(ft) * ft).real
-        # psf_sum = torch.clamp(torch.sum(psf, [-1, -2], keepdim=True), min=1e-8)
         psf_sum = torch.sum(psf, [-1, -2], keepdim=True) + 1e-8
         psf_norm = psf / psf_sum
         otf = torch.fft.fft2(psf_norm, norm="ortho")
@@ -309,7 +297,6 @@ class Network(nn.Module):
 
         tmp = torch.sum(modulus_D, dim=1)
 
-        # Use explicit epsilon addition instead of hard clamping
         eps = 1e-6
         denom_safe = denominator.real + variance[:, None, None] + eps
         loss = tmp.real - (modulus_D_star_S.real / denom_safe)
@@ -357,24 +344,12 @@ class Network(nn.Module):
 
 class DynamicStackDataset(Dataset):
     """
-    Loads Mapped Magnitude, Phase, and Original Real image paths specified in mapping.json within root_dir.
-    Supported JSON structure: 
-    "magnitude.tif": {"phase": "phase.tif", "original": "original.tif"}
+    Loads original image stacks directly from telescope subdirectories.
     """
-    def __init__(self, root_dir: str | Path, originals_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
+    def __init__(self, root_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
         self.root_path = Path(root_dir)
-        self.originals_path = Path(originals_dir)
         self.crop_dim = crop_dim
         
-        fft_map = {}
-        mapping_path = self.root_path / "mapping.json"
-        if mapping_path.exists():
-            with open(mapping_path, "r", encoding="utf-8") as f:
-                fft_map = json.load(f)
-            print(f"[INFO] Successfully loaded mapping.json with {len(fft_map)} mapped telescopes.")
-        else:
-            print(f"Warning: mapping.json not found in {self.root_path}.")
-
         telescope_samples = {}
         for tel_dir in sorted(self.root_path.iterdir()):
             if not tel_dir.is_dir():
@@ -388,58 +363,28 @@ class DynamicStackDataset(Dataset):
             with open(config_path, "r", encoding="utf-8") as f:
                 tel_config = json.load(f)
                 
-            tel_fft_map = fft_map.get(tel_dir.name, {})
             telescope_samples[tel_dir.name] = []
 
-            for module_file, target_info in tel_fft_map.items():
-                module_path = tel_dir / module_file
-
-                # Obtención de nombres de archivo desde mapping.json
-                if isinstance(target_info, dict):
-                    phase_file = target_info.get("phase", module_file)
-                    orig_file = target_info.get("original", module_file)
-                elif isinstance(target_info, list):
-                    phase_file = target_info[0]
-                    orig_file = target_info[1]
-                else:
-                    phase_file = target_info
-                    orig_file = module_file
-
-                phase_path = tel_dir / phase_file
-                
-                # Búsqueda del archivo de la imagen original en el directorio de originales asignado por código
-                orig_file_path = self.originals_path / tel_dir.name / orig_file
-                if not orig_file_path.exists():
-                    orig_file_path = self.originals_path / orig_file
-
-                if not module_path.exists():
-                    print(f"Warning: Module file does not exist: {module_path}. Skipping.")
-                    continue
-                if not phase_path.exists():
-                    print(f"Warning: Phase file does not exist: {phase_path}. Skipping.")
-                    continue
-
+            # Buscar archivos tiff dentro del directorio del telescopio (ej. archivos de imágenes originales)
+            for orig_file_path in sorted(tel_dir.glob("*.tif")):
                 try:
-                    with tiff.TiffFile(module_path) as tf:
+                    with tiff.TiffFile(orig_file_path) as tf:
                         total_frames = len(tf.pages)
                 except Exception as e:
-                    print(f"[ERROR] Failed to read {module_path.name}: {e}")
+                    print(f"[ERROR] Failed to read {orig_file_path.name}: {e}")
                     continue
 
                 telescope_samples[tel_dir.name].append({
-                    "module_path": module_path,
-                    "phase_path": phase_path,
                     "orig_path": orig_file_path,
                     "config": tel_config,
                     "n_frames": total_frames,
-                    "filename": module_file
+                    "filename": orig_file_path.name
                 })
 
         self.train_samples = []
         self.val_samples = []
         self.test_samples = []
 
-        # Split 1 val and 1 test stack from EACH telescope, prioritizing the shortest stacks
         for tel_name, samples in telescope_samples.items():
             if len(samples) < 3:
                 print(f"Warning: Telescope {tel_name} has fewer than 3 valid stacks.")
@@ -453,92 +398,69 @@ class DynamicStackDataset(Dataset):
 
         print(f"Discovered {sum(len(s) for s in telescope_samples.values())} stack files across telescope subdirectories.")
         print(f"Split -> Train: {len(self.train_samples)} | Val: {len(self.val_samples)} | Test: {len(self.test_samples)}")
-        for vs in self.val_samples:
-            print(f"  [Val Target] {vs['module_path'].name} | Total Frames: {vs['n_frames']}")
 
         if len(self.train_samples) == 0:
-            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check mapping.json.")
+            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check directory paths.")
 
     def sample_slice(self, sample_info: dict, n_frames: int = 50, start_idx: int | None = None):
         """
-        Extracts a N-frame contiguous slice from a given sample dictionary.
-        Loads Magnitude and Phase for CNN input, and Original Spatial Image to compute FFT2 for Wiener Loss.
+        Extracted N-frame contiguous slice from original images.
+        Normalizes per image/stack and calculates the 2D FFT.
         """
-        module_path: Path = sample_info["module_path"]
-        phase_path: Path = sample_info["phase_path"]
         orig_path: Path = sample_info["orig_path"]
         
-        # Read complete stack array for module and phase
-        raw_module = tiff.imread(module_path).astype("float32")
-        total_frames, H, W = raw_module.shape
+        raw_orig = tiff.imread(orig_path).astype("float32")
+        total_frames, H, W = raw_orig.shape
 
         if total_frames < n_frames:
-            raise ValueError(f"Stack {module_path.name} has only {total_frames} frames, but {n_frames} were requested.")
+            raise ValueError(f"Stack {orig_path.name} has only {total_frames} frames, but {n_frames} were requested.")
 
         max_start = total_frames - n_frames
-        
         if start_idx is None:
             start_idx = random.randint(0, max_start)
         else:
             start_idx = min(start_idx, max_start)
         
-        mod_slice = raw_module[start_idx : start_idx + n_frames]
-        raw_phase = tiff.imread(phase_path)[start_idx : start_idx + n_frames].astype("float32")
-        
-        mod_tensor = torch.tensor(mod_slice, dtype=torch.float32)
-        phase_tensor = torch.tensor(raw_phase, dtype=torch.float32)
+        orig_slice = raw_orig[start_idx : start_idx + n_frames]
+        orig_tensor = torch.tensor(orig_slice, dtype=torch.float32)
 
-        # Carga la imagen real original desde la ruta asignada
-        if orig_path.exists():
-            raw_orig = tiff.imread(orig_path)[start_idx : start_idx + n_frames].astype("float32")
-            orig_tensor = torch.tensor(raw_orig, dtype=torch.float32)
-        else:
-            print(f"Warning: Original file not found at {orig_path}. Falling back to magnitude tensor.")
-            orig_tensor = mod_tensor
-
-        # Normalización de la imagen original por su valor píxel máximo del stack
+        # Ajuste de normalización: por ejemplo, dividiendo por el valor máximo global del slice o por frame
         orig_max = orig_tensor.amax(dim=(-2, -1), keepdim=True)
         orig_tensor = orig_tensor / (orig_max + 1e-8)
 
-        # Apply crop if necessary
         if self.crop_dim is not None and (H > self.crop_dim or W > self.crop_dim):
             start_h = (H - self.crop_dim) // 2
             start_w = (W - self.crop_dim) // 2
-            mod_tensor = mod_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
-            phase_tensor = phase_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             orig_tensor = orig_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             target_dim = self.crop_dim
         else:
             target_dim = H
 
-        # Preprocesamiento de entrada de 1 canal para la red (Imagen original normalizada)
-        input_1ch = orig_tensor.unsqueeze(1)
+        # Entrada de un solo canal para la CNN
+        input_1ch = orig_tensor.unsqueeze(1) # [N_frames, 1, H, W]
 
-        # Cálculo de la FFT2 compleja directamente sobre la imagen real original normalizada para la Loss
-        fft_complex = torch.fft.fft2(orig_tensor, norm="ortho")
+        # Cálculo de la FFT2 compleja sobre la imagen real original normalizada para la Loss
+        fft_complex = torch.fft.fft2(orig_tensor, norm="ortho") # [N_frames, H, W]
 
         active_config = sample_info["config"].copy()
         active_config["target_dim"] = target_dim
 
         return {
-            "images": input_1ch,             # [N_frames, 1, H, W]
-            "images_ft": fft_complex,        # [N_frames, H, W] (complex)
+            "images": input_1ch,         # [N_frames, 1, H, W]
+            "images_ft": fft_complex,    # [N_frames, H, W] (complex)
             "config": active_config,
             "filename": sample_info["filename"],
             "start_frame": start_idx
         }
 
 class AugmentedDatasetWrapper:
-    """
-    Applies consistent spatial augmentations across all frames in a sampled sequence.
-    """
     def __init__(self, zoom_prob: float = 0.0, zoom_range: tuple = (1.05, 1.25)):
         self.zoom_prob = zoom_prob
         self.zoom_range = zoom_range
 
     def augment(self, sample: dict) -> dict:
-        images = sample["images"]        # Shape: (N_frames, 1, H, W)
-        images_ft = sample["images_ft"]  # Shape: (N_frames, H, W) (complex)
+        images = sample["images"]        
+        images_ft = sample["images_ft"] 
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -550,13 +472,11 @@ class AugmentedDatasetWrapper:
         is_128 = (H == 128 and W == 128)
         zoom_factor = 1.0
         
-        # Decide if we apply zoom (only eligible for 128x128 images)
         if is_128 and (random.random() < self.zoom_prob):
             zoom_factor = random.uniform(*self.zoom_range)
 
         augmented_frames = []
         for frame_1ch in images:
-            # 1. Rotations & Flips
             if angle != 0:
                 frame_1ch = TF.rotate(frame_1ch, angle)
             if do_hflip:
@@ -564,7 +484,6 @@ class AugmentedDatasetWrapper:
             if do_vflip:
                 frame_1ch = TF.vflip(frame_1ch)
                 
-            # 2. Conditional Resizing: ONLY if zoomed in
             if is_128 and zoom_factor > 1.0:
                 intermediate_H = int(H * zoom_factor)
                 intermediate_W = int(W * zoom_factor)
@@ -572,7 +491,6 @@ class AugmentedDatasetWrapper:
                     frame_1ch.unsqueeze(0), size=(intermediate_H, intermediate_W), 
                     mode='bilinear', align_corners=False
                 )
-                # Scale up to 256x256 to accommodate the zoomed-in ROI
                 frame_1ch = F.interpolate(
                     zoomed, size=(256, 256), mode='bilinear', align_corners=False
                 ).squeeze(0)
@@ -581,7 +499,6 @@ class AugmentedDatasetWrapper:
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Direct spatial transformations on the complex FFT tensor (images_ft) via Real and Imaginary components
         real_ft = images_ft.real
         imag_ft = images_ft.imag
 
@@ -617,7 +534,6 @@ class AugmentedDatasetWrapper:
 
         sample["images_ft"] = torch.complex(real_ft, imag_ft)
 
-        # 3. Update configuration metadata ONLY when zoomed in
         if is_128 and zoom_factor > 1.0:
             total_scale_factor = 2.0 * zoom_factor
             cfg["pixel_size"] = cfg["pixel_size"] / total_scale_factor
@@ -627,7 +543,6 @@ class AugmentedDatasetWrapper:
         return sample
 
 if __name__ == "__main__":
-    # Disable output buffering to ensure print statements write immediately to Slurm/HPC log files
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 
@@ -635,27 +550,17 @@ if __name__ == "__main__":
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"[INFO] Active device: {device}")
         
-        # Ruta del directorio de Módulo y Fase
+        # Apuntamos directamente al directorio que contiene las subcarpetas de los telescopios con las imágenes originales
         data_path = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
         
-        # Directorio de las imágenes reales originales especificadas por código
-        originals_dir = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
-        
         print(f"[INFO] Loading dataset from: {data_path.resolve()}")
-        print(f"[INFO] Loading real original images from: {originals_dir.resolve()}")
         
-        dataset = DynamicStackDataset(root_dir=data_path, originals_dir=originals_dir, seed=42)
+        dataset = DynamicStackDataset(root_dir=data_path, seed=42)
         augmentor = AugmentedDatasetWrapper(zoom_prob=0.0, zoom_range=(1.05, 1.25))
 
-        # -------------------------------------------------------------
-        # Gradient Accumulation Configuration
-        # -------------------------------------------------------------
-        num_train_samples = len(dataset.train_samples) # 10
+        num_train_samples = len(dataset.train_samples)
         accumulation_steps = max(1, num_train_samples)
 
-        # -------------------------------------------------------------
-        # Model, Optimizer & Early Stopping Setup
-        # -------------------------------------------------------------
         n_frames_per_epoch = 50
         model = Network(device=device, n_modes=119, n_frames=n_frames_per_epoch, basis_for_wavefront='kl').to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -674,11 +579,7 @@ if __name__ == "__main__":
         train_loss_history = []
         val_loss_history = []
 
-        # -------------------------------------------------------------
-        # Epoch Loop: Process All Training Stacks & Val Stacks per Epoch
-        # -------------------------------------------------------------
         for epoch in range(1, num_epochs + 1):
-            # --- TRAINING PHASE ---
             model.train()
             train_epoch_losses = []
             
@@ -688,7 +589,6 @@ if __name__ == "__main__":
             optimizer.zero_grad()
 
             for step, sample_info in enumerate(train_samples_shuffled, start=1):
-                # Random contiguous 50-frame slice for training
                 sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=None)
                 augmented_sample = augmentor.augment(sample)
                 
@@ -723,15 +623,12 @@ if __name__ == "__main__":
             train_loss_val = float(np.mean(train_epoch_losses))
             train_loss_history.append(train_loss_val)
 
-            # Update learning rate at epoch end
             scheduler.step()
 
-            # --- VALIDATION PHASE (1 shortest stack per telescope, deterministic frames 0..49, unaugmented) ---
             model.eval()
             val_epoch_losses = []
             with torch.no_grad():
                 for sample_info in dataset.val_samples:
-                    # Deterministic evaluation using first 50 frames (start_idx=0)
                     val_sample = dataset.sample_slice(sample_info, n_frames=n_frames_per_epoch, start_idx=0)
                     val_images_1ch = val_sample["images"].unsqueeze(0).to(device)
                     val_images_ft = val_sample["images_ft"].unsqueeze(0).to(device)
@@ -754,7 +651,6 @@ if __name__ == "__main__":
 
             print(f"Epoch {epoch:03d}/{num_epochs} | LR: {scheduler.get_last_lr()[0]:.2e} | Train Loss: {train_loss_val:.6e} | Val Loss: {val_loss_val:.6e}")
 
-            # --- CHECKPOINTING ---
             if val_loss_val < best_val_loss:
                 best_val_loss = val_loss_val
                 patience_counter = 0
@@ -772,7 +668,6 @@ if __name__ == "__main__":
                     print(f"Early stopping triggered at epoch {epoch}.")
                     break
 
-        # Save training logs and plots
         history = {
             "train_loss": train_loss_history,
             "val_loss": val_loss_history,
@@ -781,7 +676,6 @@ if __name__ == "__main__":
         with open(save_dir / "loss_history.json", "w", encoding="utf-8") as f:
             json.dump(history, f, indent=4)
 
-        # Gráfica combinada (Entrenamiento y Validación juntas)
         plt.figure(figsize=(9, 5))
         plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
         plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
@@ -793,32 +687,6 @@ if __name__ == "__main__":
         plt.legend()
         plt.tight_layout()
         plt.savefig(save_dir / "loss_plot.png", dpi=300)
-        plt.close()
-
-        # Gráfica individual de Entrenamiento
-        plt.figure(figsize=(9, 5))
-        plt.plot(train_loss_history, label="Training Loss", color="#1f77b4", linewidth=2)
-        plt.gca().ticklabel_format(useOffset=False, style='plain')
-        plt.xlabel("Epoch")
-        plt.ylabel("MOMFBD Loss")
-        plt.title("Training Loss")
-        plt.grid(True, which="both", linestyle="--", alpha=0.5)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_dir / "train_loss_plot.png", dpi=300)
-        plt.close()
-
-        # Gráfica individual de Validación
-        plt.figure(figsize=(9, 5))
-        plt.plot(val_loss_history, label="Validation Loss", color="#ff7f0e", linewidth=2)
-        plt.gca().ticklabel_format(useOffset=False, style='plain')
-        plt.xlabel("Epoch")
-        plt.ylabel("MOMFBD Loss")
-        plt.title("Validation Loss")
-        plt.grid(True, which="both", linestyle="--", alpha=0.5)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_dir / "val_loss_plot.png", dpi=300)
         plt.close()
 
         print(f"Finished! Run outputs written to {save_dir.resolve()}")
