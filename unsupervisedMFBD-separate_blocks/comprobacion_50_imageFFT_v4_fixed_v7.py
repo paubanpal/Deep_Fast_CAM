@@ -758,7 +758,7 @@ if __name__ == "__main__":
     import traceback
     try:
         model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_1dir_fixed_v7/best_model.pt"
-        data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals"
+        data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
         output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_1dir_fixed_v7/run_outputs_comprobacion_50/plots"
         

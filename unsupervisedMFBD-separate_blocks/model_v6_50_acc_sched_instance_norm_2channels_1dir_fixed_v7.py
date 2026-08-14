@@ -641,7 +641,7 @@ if __name__ == "__main__":
         print(f"[INFO] Active device: {device}")
         
         # Ruta del directorio de Módulo y Fase
-        data_path = Path("/scratch/paulabp/TFM/images/images_for_network/FFT/originals")
+        data_path = Path("/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs")
         
         # Directorio de las imágenes reales originales especificadas por código
         originals_dir = Path("/scratch/paulabp/TFM/images/images_for_network/originals_cropped")
