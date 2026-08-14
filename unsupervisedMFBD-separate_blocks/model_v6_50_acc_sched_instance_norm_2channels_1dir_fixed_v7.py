@@ -357,7 +357,7 @@ class Network(nn.Module):
 
 class DynamicStackDataset(Dataset):
     """
-    Loads Mapped Magnitude, Phase, and Original Real image paths specified in mapping.json within root_dir.
+    Loads Mapped Magnitude, Phase, and Original Real image paths specified in mapping_fixed.json within root_dir.
     Supported JSON structure: 
     "magnitude.tif": {"phase": "phase.tif", "original": "original.tif"}
     """
@@ -367,13 +367,13 @@ class DynamicStackDataset(Dataset):
         self.crop_dim = crop_dim
         
         fft_map = {}
-        mapping_path = self.root_path / "mapping.json"
+        mapping_path = self.root_path / "mapping_fixed.json"
         if mapping_path.exists():
             with open(mapping_path, "r", encoding="utf-8") as f:
                 fft_map = json.load(f)
-            print(f"[INFO] Successfully loaded mapping.json with {len(fft_map)} mapped telescopes.")
+            print(f"[INFO] Successfully loaded mapping_fixed.json with {len(fft_map)} mapped telescopes.")
         else:
-            print(f"Warning: mapping.json not found in {self.root_path}.")
+            print(f"Warning: mapping_fixed.json not found in {self.root_path}.")
 
         telescope_samples = {}
         for tel_dir in sorted(self.root_path.iterdir()):
@@ -394,7 +394,7 @@ class DynamicStackDataset(Dataset):
             for module_file, target_info in tel_fft_map.items():
                 module_path = tel_dir / module_file
 
-                # Obtención de nombres de archivo desde mapping.json
+                # Obtención de nombres de archivo desde mapping_fixed.json
                 if isinstance(target_info, dict):
                     phase_file = target_info.get("phase", module_file)
                     orig_file = target_info.get("original", module_file)
@@ -457,7 +457,7 @@ class DynamicStackDataset(Dataset):
             print(f"  [Val Target] {vs['module_path'].name} | Total Frames: {vs['n_frames']}")
 
         if len(self.train_samples) == 0:
-            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check mapping.json.")
+            raise RuntimeError("[CRITICAL ERROR] Training sample list is empty. Check mapping_fixed.json.")
 
     def sample_slice(self, sample_info: dict, n_frames: int = 50, start_idx: int | None = None):
         """
