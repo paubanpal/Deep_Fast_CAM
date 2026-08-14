@@ -594,14 +594,19 @@ def evaluate_reconstruction_and_modes(model_path, data_path, save_dir, device='c
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     
-    # Inversa de Fourier y recentrado espacial
-    object_spatial_complex = torch.fft.ifft2(object_ft, norm="ortho")
-    object_spatial_centered = torch.fft.fftshift(object_spatial_complex, dim=(-2, -1))
-    object_reconstructed_raw = object_spatial_centered.real.squeeze().cpu().numpy()
+    # 1. Aplicar ifftshift para mover la componente DC desde las esquinas al centro del dominio de Fourier
+    object_ft_centered = torch.fft.ifftshift(object_ft, dim=(-2, -1))
+
+    # 2. Inversa de Fourier a partir del espectro centrado
+    object_spatial_complex = torch.fft.ifft2(object_ft_centered, norm="ortho")
+    
+    # (Opcional) Si quisieras asegurar el recentrado espacial absoluto, 
+    # pero con ifftshift previo la estrella ya debería quedar en el centro exacto:
+    object_reconstructed_raw = object_spatial_complex.real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
-
+    
     # Guardar objeto reconstruido en TIFF y PNG
     obj_tiff_path = save_dir / "reconstructed_object.tiff"
     tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
