@@ -762,7 +762,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     plt.tight_layout()
     plt.savefig(save_dir / "inspection_frame0_and_psf.png", dpi=300)
     plt.close()
-    print(f"--> Gráfica comparativa guardada exitosamente en: {obj_plot_path}")
+    
 
     # --- TAREA 2: Espectro de los Modos KL ---
     print("[INFO] Generando gráfica de decaimiento KL...")
