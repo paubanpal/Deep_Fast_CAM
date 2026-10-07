@@ -627,23 +627,6 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     print(f"--> [PUPILA] Factor overfill aplicado: {model.overfill:.3f}\n")
     # =========================================================================
 
-    # Test con perturbación de alta frecuencia y amplitud atmosférica real (D/r0 alto)
-    # Generamos coeficientes sintéticos con RMS ~ 2.5 rad
-    coeff_turbulento = torch.randn_like(coeff) * 1.5 
-    with torch.no_grad():
-        psf_turb, _, _ = model.compute_psfs(coeff_turbulento)
-    
-    psf_turb_centered = torch.fft.fftshift(psf_turb[0], dim=(-2, -1)).cpu().numpy()
-    
-    # Hacemos un zoom central de 128x128 píxeles en torno al centro geométrico (256, 256)
-    # para no perder la estructura en la inmensidad de los 512x512 ceros
-    c = 256
-    box = 64
-    psf_turb_crop = psf_turb_centered[c-box : c+box, c-box : c+box]
-    
-    plt.imsave(save_dir / "psf_sintetica_turbulenta_crop.png", psf_turb_crop, cmap='inferno')
-    print(f"--> [TEST] Guardada PSF turbulenta sintética en: {save_dir / 'psf_sintetica_turbulenta_crop.png'}")
-
     # 3. Preprocesamiento e Inferencia
     print("[INFO] Ejecutando inferencia...")
     variance = torch.tensor([1e-3], dtype=torch.float32, device=device)
@@ -651,6 +634,24 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
 
     with torch.no_grad():
         coeff, num, den, psf, psf_ft, loss, wavefront = model(images_1ch, images_ft, variance, lengths=lengths)
+
+    # =========================================================================
+    # Test sintético con turbulencia alta (ahora 'coeff' ya existe)
+    # =========================================================================
+    coeff_turbulento = torch.randn_like(coeff) * 1.5 
+    with torch.no_grad():
+        psf_turb, _, _ = model.compute_psfs(coeff_turbulento)
+    
+    psf_turb_centered = torch.fft.fftshift(psf_turb[0], dim=(-2, -1)).cpu().numpy()
+    
+    # Zoom central de 128x128 píxeles en torno al centro geométrico (H//2, W//2)
+    cy, cx = H // 2, W // 2
+    box = 64
+    psf_turb_crop = psf_turb_centered[cy - box : cy + box, cx - box : cx + box]
+    
+    plt.imsave(save_dir / "psf_sintetica_turbulenta_crop.png", psf_turb_crop, cmap='inferno')
+    print(f"--> [TEST] Guardada PSF turbulenta sintética en: {save_dir / 'psf_sintetica_turbulenta_crop.png'}")
+    # =========================================================================
 
     # =========================================================================
     # AÑADIR AQUÍ: Diagnóstico del RMS del frente de onda en la pupila
