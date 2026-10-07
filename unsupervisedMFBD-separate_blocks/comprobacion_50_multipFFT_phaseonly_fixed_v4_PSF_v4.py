@@ -656,6 +656,21 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     plt.imsave(first_psf_log_png_path, np.log10(psf_first_centered + 1e-6), cmap='inferno')
     print(f"--> PSF (frame 0) guardada en PNG logarítmico: {first_psf_log_png_path}")
 
+    # =========================================================================
+    # AÑADIR AQUÍ: Test escalando la fase por 2*pi
+    # =========================================================================
+    print("[INFO] Generando PSF con escalado 2*pi...")
+    with torch.no_grad():
+        psf_test, _, _ = model.compute_psfs(2 * np.pi * coeff)
+    
+    psf_test_centered = torch.fft.fftshift(psf_test[0], dim=(-2, -1)).cpu().numpy()
+    
+    # Guardar en lineal y logarítmico para inspeccionar
+    plt.imsave(save_dir / "psf_frame_0_scaled_2pi.png", psf_test_centered, cmap='viridis')
+    plt.imsave(save_dir / "psf_frame_0_scaled_2pi_log.png", np.log10(psf_test_centered + 1e-6), cmap='inferno')
+    print(f"--> PSF escalada por 2*pi guardada en: {save_dir / 'psf_frame_0_scaled_2pi.png'}")
+    # =========================================================================
+
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) y Búsqueda de Imagen Original ---
     print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
