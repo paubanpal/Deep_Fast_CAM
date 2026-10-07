@@ -610,7 +610,7 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     print("[INFO] Actualizando bases del telescopio...")
     model.update_telescope_basis(
         pixel_size=cfg["pixel_size"],
-        telescope_diameter=cfg["telescope_diameter"],git pull
+        telescope_diameter=cfg["telescope_diameter"],
         central_obscuration=cfg.get("central_obscuration", 0.0),
         wavelength=cfg["wavelength"],
         npix_image=H
