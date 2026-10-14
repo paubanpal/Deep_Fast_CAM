@@ -65,8 +65,8 @@ class CNN(nn.Module):
 
         self.n_lstm = n_lstm
 
-        # Entrada de 1 canal: Fase únicamente
-        self.A01 = ConvBlock(1, n, kernel_size=9, bn=False, activation=False)
+        # Entrada de 2 canales: Módulo + Fase
+        self.A01 = ConvBlock(2, n, kernel_size=9, bn=False, activation=False)
 
         self.C01 = ConvBlock(n, n, kernel_size=7, stride=2)
         self.C02 = ConvBlock(n, n, kernel_size=7)
@@ -365,8 +365,9 @@ class DynamicStackDataset(Dataset):
     Carga stacks emparejados de Módulo y Fase especificados en mapping.json dentro de root_dir.
     Estructura JSON soportada: "magnitud.tif": "fase.tif"
     """
-    def __init__(self, root_dir: str | Path, crop_dim: int | None = None, seed: int = 42):
+    def __init__(self, root_dir: str | Path, orig_data_path: str | Path, crop_dim: int | None = None, seed: int = 42):
         self.root_path = Path(root_dir)
+        self.orig_data_path = Path(orig_data_path)
         self.crop_dim = crop_dim
         
         fft_map = {}
@@ -399,6 +400,16 @@ class DynamicStackDataset(Dataset):
                 module_path = tel_dir / module_file
                 phase_path = tel_dir / phase_file
 
+                # Buscar la imagen original correspondiente en orig_data_path
+                base_stem = module_file.split('_cropped')[0]
+                orig_tel_dir = self.orig_data_path / tel_dir.name
+                matched_orig_path = None
+                if orig_tel_dir.exists():
+                    for orig_file in sorted(orig_tel_dir.glob("*.tif*")):
+                        if base_stem in orig_file.name:
+                            matched_orig_path = orig_file
+                            break
+
                 if not module_path.exists():
                     print(f"Warning: No existe el archivo de módulo: {module_path}. Omitiendo.")
                     continue
@@ -416,6 +427,7 @@ class DynamicStackDataset(Dataset):
                 telescope_samples[tel_dir.name].append({
                     "module_path": module_path,
                     "phase_path": phase_path,
+                    "orig_path": matched_orig_path,
                     "config": tel_config,
                     "n_frames": total_frames,
                     "filename": module_file,
@@ -455,6 +467,7 @@ class DynamicStackDataset(Dataset):
         """
         module_path: Path = sample_info["module_path"]
         phase_path: Path = sample_info["phase_path"]
+        orig_path: Path = sample_info["orig_path"]
         
         # Read complete stack array for both module and phase
         raw_module = tiff.imread(module_path).astype("float32")
@@ -473,10 +486,15 @@ class DynamicStackDataset(Dataset):
         mod_slice = raw_module[start_idx : start_idx + n_frames]
         raw_phase = tiff.imread(phase_path)[start_idx : start_idx + n_frames].astype("float32")
         
-        # Normalizar el flujo del Módulo de entrada dividiendo por su energía media
-        mod_sum = np.sum(mod_slice, axis=(-2, -1), keepdims=True)
-        mod_mean_flux = np.sum(mod_sum, axis=0, keepdims=True) / n_frames
-        mod_slice = mod_slice / (mod_mean_flux + 1e-8)
+        # Cargar la imagen original del telescopio si existe
+        if orig_path and orig_path.exists():
+            raw_orig = tiff.imread(orig_path)[start_idx : start_idx + n_frames].astype("float32")
+            orig_max = raw_orig.max()
+            orig_tensor = torch.tensor(raw_orig / (orig_max + 1e-8), dtype=torch.float32)
+        else:
+            orig_tensor = torch.tensor(mod_slice, dtype=torch.float32)
+            orig_max = orig_tensor.amax()
+            orig_tensor = orig_tensor / (orig_max + 1e-8)
 
         mod_tensor = torch.tensor(mod_slice, dtype=torch.float32)
         phase_tensor = torch.tensor(raw_phase, dtype=torch.float32)
@@ -487,12 +505,17 @@ class DynamicStackDataset(Dataset):
             start_w = (W - self.crop_dim) // 2
             mod_tensor = mod_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             phase_tensor = phase_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
+            orig_tensor = orig_tensor[:, start_h:start_h + self.crop_dim, start_w:start_w + self.crop_dim]
             target_dim = self.crop_dim
         else:
             target_dim = H
 
-        # Tensor de entrada de 1 canal [Fase] -> Shape: (N_frames, 1, H, W)
-        input_1ch = phase_tensor.unsqueeze(1)
+        # Normalización del módulo de la imagen original por su valor máximo del stack
+        orig_max_val = orig_tensor.amax(dim=(-2, -1), keepdim=True)
+        orig_tensor_norm = orig_tensor / (orig_max_val + 1e-8)
+
+        # Tensor de entrada de 2 canales [Módulo original normalizado, Fase original (o de FFT)] -> Shape: (N_frames, 2, H, W)
+        input_2ch = torch.stack([orig_tensor_norm, phase_tensor], dim=1)
         
         # Reconstrucción compleja aplicando ifftshift para deshacer la traslación de la componente DC al centro
         raw_complex = mod_tensor * torch.exp(1j * phase_tensor)
@@ -502,7 +525,7 @@ class DynamicStackDataset(Dataset):
         active_config["target_dim"] = target_dim
 
         return {
-            "images": input_1ch,             # [N_frames, 1, H, W]
+            "images": input_2ch,             # [N_frames, 2, H, W]
             "images_ft": fft_complex,        # [N_frames, H, W] (complejo)
             "config": active_config,
             "filename": sample_info["filename"],
@@ -519,7 +542,7 @@ class AugmentedDatasetWrapper:
         self.zoom_range = zoom_range
 
     def augment(self, sample: dict) -> dict:
-        images = sample["images"]  # Shape: (N_frames, 1, H, W)
+        images = sample["images"]  # Shape: (N_frames, 2, H, W)
         cfg = dict(sample["config"])
         
         N, C, H, W = images.shape
@@ -536,35 +559,35 @@ class AugmentedDatasetWrapper:
             zoom_factor = random.uniform(*self.zoom_range)
 
         augmented_frames = []
-        for frame_1ch in images:
+        for frame_2ch in images:
             # 1. Rotations & Flips
             if angle != 0:
-                frame_1ch = TF.rotate(frame_1ch, angle)
+                frame_2ch = TF.rotate(frame_2ch, angle)
             if do_hflip:
-                frame_1ch = TF.hflip(frame_1ch)
+                frame_2ch = TF.hflip(frame_2ch)
             if do_vflip:
-                frame_1ch = TF.vflip(frame_1ch)
+                frame_2ch = TF.vflip(frame_2ch)
                 
             # 2. Conditional Resizing: ONLY if zoomed in
             if is_128 and zoom_factor > 1.0:
                 intermediate_H = int(H * zoom_factor)
                 intermediate_W = int(W * zoom_factor)
                 zoomed = F.interpolate(
-                    frame_1ch.unsqueeze(0), size=(intermediate_H, intermediate_W), 
+                    frame_2ch.unsqueeze(0), size=(intermediate_H, intermediate_W), 
                     mode='bilinear', align_corners=False
                 )
                 # Scale up to 256x256 to accommodate the zoomed-in ROI
-                frame_1ch = F.interpolate(
+                frame_2ch = F.interpolate(
                     zoomed, size=(256, 256), mode='bilinear', align_corners=False
                 ).squeeze(0)
 
-            augmented_frames.append(frame_1ch)
+            augmented_frames.append(frame_2ch)
 
         sample["images"] = torch.stack(augmented_frames, dim=0)
         
-        # Recalcular la FFT compleja tras las transformaciones aplicando ifftshift (asumiendo módulo uniforme o recuperado si procede)
-        mod_aug = torch.ones_like(sample["images"][:, 0, :, :])
-        phase_aug = sample["images"][:, 0, :, :]
+        # Recalcular la FFT compleja tras las transformaciones aplicando ifftshift
+        mod_aug = sample["images"][:, 0, :, :]
+        phase_aug = sample["images"][:, 1, :, :]
         raw_complex_aug = mod_aug * torch.exp(1j * phase_aug)
         sample["images_ft"] = torch.fft.ifftshift(raw_complex_aug, dim=(-2, -1))
 
@@ -587,15 +610,15 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     
     # 1. Cargar Dataset de Validación
     print("[INFO] Cargando dataset de validación...")
-    dataset = DynamicStackDataset(root_dir=data_path, seed=42)
+    dataset = DynamicStackDataset(root_dir=data_path, orig_data_path=orig_data_path, seed=42)
     val_sample_info = dataset.val_samples[0]
     print(f"[INFO] Stack seleccionado: {val_sample_info['module_path'].name}")
     
     val_sample = dataset.sample_slice(val_sample_info, n_frames=50, start_idx=0)
-    images_1ch = val_sample["images"].unsqueeze(0).to(device)     # [1, 50, 1, H, W]
+    images_2ch = val_sample["images"].unsqueeze(0).to(device)     # [1, 50, 2, H, W]
     images_ft = val_sample["images_ft"].unsqueeze(0).to(device)   # [1, 50, H, W]
     cfg = val_sample["config"]
-    H, W = images_1ch.shape[-2], images_1ch.shape[-1]
+    H, W = images_2ch.shape[-2], images_2ch.shape[-1]
 
     # 2. Inicializar y Cargar Modelo Entrenado
     print("[INFO] Cargando modelo y pesos...")
@@ -623,36 +646,66 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
     lengths = torch.tensor([50], dtype=torch.int64, device=device)
 
     with torch.no_grad():
-        coeff, num, den, psf, psf_ft, loss = model(images_1ch, images_ft, variance, lengths=lengths)
+        coeff, num, den, psf, psf_ft, loss = model(images_2ch, images_ft, variance, lengths=lengths)
+
+    # =========================================================================
+    # DIAGNÓSTICO Y EXTRACCIÓN DE PSFs
+    # =========================================================================
+    # psf shape: [B * Nf, H, W] -> [50, H, W]
+    print("[INFO] Procesando y guardando PSFs...")
+    
+    # Recentrar la componente DC desde (0, 0) al centro geométrico (H//2, W//2)
+    psfs_centered = torch.fft.fftshift(psf, dim=(-2, -1)).cpu().numpy()
+    
+    # PSF instantánea (frame 0) y PSF promediada (long-exposure del burst)
+    psf_f0 = psfs_centered[0]
+    psf_mean = psfs_centered.mean(axis=0)
+
+    # Coordenadas para recorte central (128x128) para inspección sin dispersión de ceros
+    cy, cx = H // 2, W // 2
+    box = min(64, H // 2)
+    psf_f0_crop = psf_f0[cy - box : cy + box, cx - box : cx + box]
+    psf_mean_crop = psf_mean[cy - box : cy + box, cx - box : cx + box]
+
+    # Diagnóstico del RMS del frente de onda (frame 0)
+    wavefront_f0 = torch.einsum('ij,jkl->ikl', coeff[0:1], model.basis).squeeze(0)
+    pupil_mask = (model.pupil > 0.5)
+    rms_rad = torch.std(wavefront_f0[pupil_mask]).item()
+    print(f"--> [DIAGNÓSTICO] RMS del frente de onda (frame 0): {rms_rad:.4f} rad")
+
+    # 1. Guardar TIFFs float32
+    tiff.imwrite(save_dir / "psf_frame_0.tiff", psf_f0.astype(np.float32))
+    tiff.imwrite(save_dir / "psf_frame_0_crop128.tiff", psf_f0_crop.astype(np.float32))
+    tiff.imwrite(save_dir / "psf_burst_mean.tiff", psf_mean.astype(np.float32))
+    tiff.imwrite(save_dir / "psf_burst_mean_crop128.tiff", psf_mean_crop.astype(np.float32))
+
+    # 2. Guardar PNGs (Lineal y Logarítmico del ROI recortado)
+    plt.imsave(save_dir / "psf_frame_0_crop_linear.png", psf_f0_crop, cmap='viridis')
+    plt.imsave(save_dir / "psf_frame_0_crop_log.png", np.log10(psf_f0_crop + 1e-6), cmap='inferno')
+    plt.imsave(save_dir / "psf_burst_mean_crop_log.png", np.log10(psf_mean_crop + 1e-6), cmap='inferno')
+    print(f"--> PSFs guardadas exitosamente en {save_dir}")
 
     # --- TAREA 1: Reconstrucción del Objeto (Filtro de Wiener) y Búsqueda de Imagen Original ---
     print("[INFO] Generando gráfica y archivos del objeto reconstruido...")
     eps = 1e-6
     object_ft = num / (den.real + variance[:, None, None] + eps)
     
-    # Inversa de Fourier y recentrado espacial de la componente DC al centro
+    # Inversa de Fourier directa
     object_spatial_complex = torch.fft.ifft2(object_ft, norm="ortho")
-    object_spatial_centered = torch.fft.fftshift(object_spatial_complex, dim=(-2, -1))
-    object_reconstructed_raw = object_spatial_centered.real.squeeze().cpu().numpy()
+    object_reconstructed_raw = object_spatial_complex.real.squeeze().cpu().numpy()
 
     # Aplicar restricción física de no-negatividad (positividad)
     object_reconstructed = np.clip(object_reconstructed_raw, a_min=0, a_max=None)
-
-    # Guardar objeto reconstruido por separado en TIFF (32-bit float)
+    
+    # Guardar objeto reconstruido en TIFF (32-bit float) y PNG
     obj_tiff_path = save_dir / "reconstructed_object.tiff"
     tiff.imwrite(obj_tiff_path, object_reconstructed.astype(np.float32))
-    print(f"--> Objeto reconstruido aislado guardado en TIFF exitosamente en: {obj_tiff_path}")
-
-    # Guardar objeto reconstruido por separado en PNG
     obj_single_png_path = save_dir / "reconstructed_object.png"
     plt.imsave(obj_single_png_path, object_reconstructed, cmap='gray')
-    print(f"--> Objeto reconstruido aislado guardado en PNG exitosamente en: {obj_single_png_path}")
 
     # Búsqueda del stack de imágenes originales correspondiente
     tel_name = val_sample_info["tel_dir_name"]
     mod_filename = val_sample_info["module_path"].name
-    
-    # Extraer identificador base del nombre (e.g. "CHR181", "wds15245", etc.)
     base_stem = mod_filename.split('_cropped')[0]
     
     orig_tel_dir = orig_data_path / tel_name
@@ -668,7 +721,6 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
         print(f"[INFO] Imagen original equivalente encontrada en: {matched_orig_path}")
         raw_orig_stack = tiff.imread(matched_orig_path)[:50].astype("float32")
         
-        # Aplicar el mismo recorte central si la imagen original es más grande
         orig_H, orig_W = raw_orig_stack.shape[-2], raw_orig_stack.shape[-1]
         if orig_H > H or orig_W > W:
             start_h = (orig_H - H) // 2
@@ -677,32 +729,34 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
             
         degraded_mean = raw_orig_stack.mean(axis=0)
     else:
-        print(f"[WARNING] No se encontró coincidencia directa para '{base_stem}' en {orig_tel_dir}. Usando ceros o referencia alternativa.")
-        degraded_mean = np.zeros((H, W))
+        print(f"[WARNING] No se encontró coincidencia directa para '{base_stem}' en {orig_tel_dir}. Usando media de canal de módulo.")
+        degraded_mean = images_2ch[0, :, 0, :, :].mean(dim=0).cpu().numpy()
 
-    # Guardar la imagen media de la entrada degradada por separado en TIFF (32-bit float)
+    # Guardar imagen media degradada
     mean_tiff_path = save_dir / "degraded_mean_input.tiff"
     tiff.imwrite(mean_tiff_path, degraded_mean.astype(np.float32))
-    print(f"--> Media de entrada degradada guardada en TIFF exitosamente en: {mean_tiff_path}")
-
-    # Guardar la imagen media de la entrada degradada por separado en PNG
     mean_png_path = save_dir / "degraded_mean_input.png"
     plt.imsave(mean_png_path, degraded_mean, cmap='gray')
-    print(f"--> Media de entrada degradada guardada en PNG exitosamente en: {mean_png_path}")
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    # Gráfica combinada de 3 paneles: Entrada Degradada, Objeto Reconstruido y PSF Instantánea
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     axes[0].imshow(degraded_mean, cmap='gray')
-    axes[0].set_title("Media Simple (Entrada Original)")
+    axes[0].set_title("Media Simple (Entrada Degradada)")
     axes[0].axis('off')
 
     axes[1].imshow(object_reconstructed, cmap='gray')
     axes[1].set_title("Objeto Reconstruido (Wiener)")
     axes[1].axis('off')
 
-    plt.suptitle(f"Reconstrucción - Stack: {val_sample_info['module_path'].name}", fontsize=14)
+    im_psf = axes[2].imshow(np.log10(psf_f0_crop + 1e-6), cmap='inferno')
+    axes[2].set_title(r"PSF Frame 0 ($\log_{10}$, ROI 128x128)")
+    axes[2].axis('off')
+    fig.colorbar(im_psf, ax=axes[2], fraction=0.046, pad=0.04)
+
+    plt.suptitle(f"Reconstrucción y PSF - Stack: {val_sample_info['module_path'].name}", fontsize=14)
     plt.tight_layout()
     
-    obj_plot_path = save_dir / "inspection_reconstructed_object.png"
+    obj_plot_path = save_dir / "inspection_reconstructed_and_psf.png"
     plt.savefig(obj_plot_path, dpi=300)
     plt.close()
     print(f"--> Gráfica comparativa guardada exitosamente en: {obj_plot_path}")
@@ -735,10 +789,10 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
 if __name__ == "__main__":
     import traceback
     try:
-        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_1channel_multipFFT_phaseonly_fixed_v4/best_model.pt"
-        data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/mult_FFTs"
+        model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8/best_model.pt"
+        data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_1channel_multipFFT_phaseonly_fixed_v4_PSF_prueba/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8_PSF/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, orig_data_dir, save_dir=output_dir)
     except Exception as e:
