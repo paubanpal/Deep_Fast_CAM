@@ -648,6 +648,28 @@ def evaluate_reconstruction_and_modes(model_path, data_path, orig_data_path, sav
         coeff, num, den, psf, psf_ft, loss = model(images_2ch, images_ft, variance, lengths=lengths)
 
     # =========================================================================
+    # DIAGNÓSTICO EXHAUSTIVO DE FASE Y MODOS
+    # =========================================================================
+    pupil_bool = (model.pupil > 0.5)
+    wf_f0 = torch.einsum('ij,jkl->ikl', coeff[0:1], model.basis).squeeze(0)
+    fase_pupila = wf_f0[pupil_bool]
+
+    print("\n" + "="*50)
+    print("DIAGNÓSTICO FÍSICO DE LA FASE:")
+    print(f"Modo KL 1 (amplitud): {coeff[0, 0].item():.5f} rad")
+    print(f"Modo KL 2 (amplitud): {coeff[0, 1].item():.5f} rad")
+    print(f"Modo KL 3 (amplitud): {coeff[0, 2].item():.5f} rad")
+    print(f"Rango de fase en la pupila: [{fase_pupila.min().item():.3f}, {fase_pupila.max().item():.3f}] rad")
+    print(f"RMS del frente de onda dentro de la pupila: {fase_pupila.std().item():.4f} rad")
+    print(f"Strehl aproximado (exp(-RMS^2)): {np.exp(-fase_pupila.std().item()**2):.4f}")
+    print("="*50 + "\n")
+
+    # Guardar mapa 2D del frente de onda en la pupila para ver su forma geométrica
+    wf_masked = (wf_f0 * model.pupil).cpu().numpy()
+    plt.imsave(save_dir / "wavefront_pupil_frame0.png", wf_masked, cmap='coolwarm')
+    print(f"--> Mapa de frente de onda guardado en: {save_dir / 'wavefront_pupil_frame0.png'}")
+
+    # =========================================================================
     # DIAGNÓSTICO Y EXTRACCIÓN DE PSFs
     # =========================================================================
     # psf shape: [B * Nf, H, W] -> [50, H, W]
