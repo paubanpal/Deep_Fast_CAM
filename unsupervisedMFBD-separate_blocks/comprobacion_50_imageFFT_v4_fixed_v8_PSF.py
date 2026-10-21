@@ -383,8 +383,7 @@ class DynamicStackDataset(Dataset):
             if not tel_dir.is_dir():
                 continue
                 
-            #config_path = tel_dir / "config.json"
-            config_path = tel_dir / "config_prueba.json"
+            config_path = tel_dir / "config.json"
             if not config_path.exists():
                 print(f"Warning: Skipping {tel_dir.name} because config.json was not found.")
                 continue
@@ -814,7 +813,7 @@ if __name__ == "__main__":
         model_ckpt = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8/best_model.pt"
         data_dir = "/scratch/paulabp/TFM/images/images_for_network/FFT/originals/FFTs"
         orig_data_dir = "/scratch/paulabp/TFM/images/images_for_network/originals_cropped"
-        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8_PSF_prueba/run_outputs_comprobacion_50/plots"
+        output_dir = "/scratch/paulabp/TFM/run_outputs_v6_50_acc_sched_instance_norm_2channels_imagesFFT_fixed_v8_PSF/run_outputs_comprobacion_50/plots"
         
         evaluate_reconstruction_and_modes(model_ckpt, data_dir, orig_data_dir, save_dir=output_dir)
     except Exception as e:
