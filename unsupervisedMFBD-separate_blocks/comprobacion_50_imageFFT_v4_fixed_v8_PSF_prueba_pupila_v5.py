@@ -188,7 +188,7 @@ class Network(nn.Module):
         if (self.overfill < 1.0):
             raise Exception(f"The pixel size is not small enough to model a telescope with D={self.telescope_diameter} cm")
             
-        pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter, spider=0, overfill=self.overfill)
+        pupil = util.aperture(npix=self.npix_image, cent_obs = self.central_obscuration / self.telescope_diameter / self.overfill, spider=0, overfill=self.overfill)
         print(f"Pupil shape: {pupil.shape}")
         pupil = torch.tensor(pupil.astype('float32'))
             
