@@ -385,9 +385,9 @@ class DynamicStackDataset(Dataset):
                 continue
                 
             #config_path = tel_dir / "config.json"
-            config_path = tel_dir / "config_prueba.json"
+            config_path = tel_dir / "config.json"
             if not config_path.exists():
-                print(f"Warning: Skipping {tel_dir.name} because config_prueba.json was not found.")
+                print(f"Warning: Skipping {tel_dir.name} because config.json was not found.")
                 continue
                 
             with open(config_path, "r", encoding="utf-8") as f:
